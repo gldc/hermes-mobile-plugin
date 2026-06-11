@@ -1,0 +1,14 @@
+name: hermes-mobile
+kind: platform
+version: 0.1.0
+description: >
+  Mobile companion plugin for hermes-agent: QR-paired per-device dashboard
+  auth (rotating ~15-min access tokens, 30-day refresh tokens with reuse
+  detection, individually revocable), a `hermes mobile` CLI for pairing and
+  device management, and an upcoming `mobile` platform adapter for
+  mailbox + redacted Expo push delivery.
+author: gldc@users.noreply.github.com
+requires_env: []
+optional_env: []
+provides_tools: []
+provides_hooks: []
