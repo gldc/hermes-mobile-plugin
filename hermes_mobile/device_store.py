@@ -142,6 +142,7 @@ class DeviceStore:
             "access_token_hash": "",
             "access_expires_at": 0,
             "last_refresh_at": 0,
+            "push_token": "",
         }
         self._save(data)
         return device_id, refresh_token
@@ -237,6 +238,36 @@ class DeviceStore:
                 self._save(data)
                 return True
         return False
+
+    def get_device(self, device_id: str) -> Optional[Dict[str, Any]]:
+        """Copy of one device record by id, or ``None`` if unknown."""
+        data = self._load()
+        dev = data["devices"].get(device_id)
+        return dict(dev) if dev is not None else None
+
+    def set_push_token(self, device_id: str, token: str) -> bool:
+        """Store/refresh the device's Expo push token.
+
+        Returns False for unknown or revoked devices. The push token is
+        stored as-is (it is needed verbatim to call Expo's push API; it
+        is not a credential against this gateway).
+        """
+        data = self._load()
+        dev = data["devices"].get(device_id)
+        if dev is None or dev.get("revoked"):
+            return False
+        dev["push_token"] = str(token or "")
+        self._save(data)
+        return True
+
+    def get_push_token(self, device_id: str) -> Optional[str]:
+        """The device's Expo push token, or ``None`` if unset/unknown/revoked."""
+        data = self._load()
+        dev = data["devices"].get(device_id)
+        if dev is None or dev.get("revoked"):
+            return None
+        token = str(dev.get("push_token", "") or "")
+        return token or None
 
     def list_devices(self) -> List[Dict[str, Any]]:
         """All device records (copies), token hashes included (hashes only)."""
