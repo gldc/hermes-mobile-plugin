@@ -12,7 +12,8 @@ hermes-agent — no fork changes, nothing exposed to the public internet.
 | **Auth provider** (`mobile-device`) | Per-device dashboard sessions: ~15-minute access tokens, 30-day rotating refresh tokens, SHA-256 hashes only at rest, refresh-token **reuse detection** (a replayed rotated-out token revokes the whole device). Devices live in `~/.hermes/mobile/devices.json`. |
 | **CLI** (`hermes mobile`) | `pair` (mint a device + QR), `devices` (list), `revoke <device_id>`. |
 | **Platform adapter** (`mobile`) | Makes a paired phone a `send_message`/cron-delivery target: messages append to a per-device mailbox (`~/.hermes/mobile/mailbox/<device_id>.jsonl`) and fire a **redacted** Expo push ("New message from Hermes"). |
-| **Dashboard API** (`/api/plugins/mobile/…`) | `POST /push-token` (register the device's Expo push token), `GET /mailbox` (return + drain queued messages), `GET /me` (device self-info). All routes require a `mobile-device` session — other providers' sessions get 403. |
+| **Dashboard API** (`/api/plugins/mobile/…`) | `POST /push-token` (register the device's Expo push token), `GET /mailbox` (return + drain queued messages), `GET /me` (device self-info). These routes require a `mobile-device` session — other providers' sessions get 403. |
+| **Memory API** (`/api/plugins/mobile/memory/…`) | CRUD for hermes' built-in memory files `MEMORY.md` / `USER.md` (`~/.hermes/memories/`): `GET /memory/files` (list with size/mtime), `GET /memory/files/{name}` (read), `PUT /memory/files/{name}` (atomic full-file replace, ≤ 256 KiB). Open to **any** authenticated dashboard session (browser or device); file names are matched against a fixed allowlist and never path-joined. Full contract: [`docs/MEMORY_API.md`](docs/MEMORY_API.md). |
 
 ## Install
 
@@ -106,4 +107,5 @@ Layout: `hermes_mobile/` (device_store, auth_provider, cli, push,
 mailbox, adapter, plugin_api), `dashboard/` (manifest + router shim the
 dashboard web server imports), root `__init__.py` + `plugin.yaml`
 (hermes directory-plugin entry point), `docs/CONTRACTS.md` (the exact
-hermes surfaces this plugin builds against).
+hermes surfaces this plugin builds against), `docs/MEMORY_API.md` (the
+memory-file route contract the mobile app consumes).
