@@ -27,9 +27,13 @@ class FakeCtx:
     def __init__(self) -> None:
         self.auth_providers: list = []
         self.cli_commands: list = []
+        self.platforms: list = []
 
     def register_dashboard_auth_provider(self, provider) -> None:
         self.auth_providers.append(provider)
+
+    def register_platform(self, **kwargs) -> None:
+        self.platforms.append(kwargs)
 
     def register_cli_command(
         self, name, help, setup_fn, handler_fn=None, description=""
@@ -91,6 +95,23 @@ def test_register_with_real_signature(plugin_module):
     ctx = FakeCtx()
     plugin_module.register(ctx)
     assert len(ctx.auth_providers) == 1
+
+
+def test_register_registers_cli_command(plugin_module, tmp_path):
+    ctx = FakeCtx()
+    plugin_module.register(ctx, _store=DeviceStore(path=tmp_path / "d.json"))
+    assert [c["name"] for c in ctx.cli_commands] == ["mobile"]
+
+
+def test_register_registers_mobile_platform(plugin_module, tmp_path):
+    ctx = FakeCtx()
+    plugin_module.register(ctx, _store=DeviceStore(path=tmp_path / "d.json"))
+    assert len(ctx.platforms) == 1
+    entry = ctx.platforms[0]
+    assert entry["name"] == "mobile"
+    assert entry["label"] == "Mobile"
+    assert callable(entry["adapter_factory"])
+    assert entry["check_fn"]() is True
 
 
 def test_register_skips_cli_until_module_exists(plugin_module):

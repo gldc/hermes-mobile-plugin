@@ -34,14 +34,14 @@ def register_all(ctx, store: Optional[DeviceStore] = None) -> None:
     ctx.register_dashboard_auth_provider(provider)
     logger.info("hermes-mobile: registered '%s' auth provider", provider.name)
 
-    # 2. CLI commands (`hermes mobile pair|devices|revoke`) — implemented
-    #    in hermes_mobile.cli (later milestone). Import structure is in
-    #    place; we register only what exists now.
+    # 2. CLI commands (`hermes mobile pair|devices|revoke`).
     _register_cli(ctx, store)
 
-    # 3. Platform adapter ('mobile' push/mailbox platform) — later
-    #    milestone; will live in hermes_mobile.platform_adapter and be
-    #    registered here via ctx.register_platform(...).
+    # 3. Platform adapter — the 'mobile' mailbox + redacted-Expo-push
+    #    platform. hermes_mobile.adapter imports gateway code, so it is
+    #    only imported here, at registration time, where the host
+    #    guarantees the gateway package is importable.
+    _register_platform(ctx, store)
 
 
 def _register_cli(ctx, store: DeviceStore) -> None:
@@ -53,3 +53,18 @@ def _register_cli(ctx, store: DeviceStore) -> None:
         )
         return
     cli.register_cli(ctx, store)
+
+
+def _register_platform(ctx, store: DeviceStore) -> None:
+    try:
+        from . import adapter
+    except ImportError:
+        # Host process without the gateway package on the path — the
+        # auth provider and CLI must keep working regardless.
+        logger.debug(
+            "hermes-mobile: gateway not importable; skipping register_platform",
+            exc_info=True,
+        )
+        return
+    adapter.register_platform(ctx, store)
+    logger.info("hermes-mobile: registered 'mobile' platform adapter")
