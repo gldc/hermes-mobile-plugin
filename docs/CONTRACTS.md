@@ -1,6 +1,6 @@
 # Hermes Plugin Contracts — extracted from hermes-agent source
 
-Source tree: `~/hermes-agent` (read-only reference).
+Source tree: a local checkout of [hermes-agent](https://github.com/NousResearch/hermes-agent) (read-only reference).
 All line numbers refer to that checkout as of 2026-06-11 (branch `main`,
 HEAD `ad9012097`). Verbatim signatures are copied exactly from source.
 
