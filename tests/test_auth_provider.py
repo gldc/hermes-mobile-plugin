@@ -1,7 +1,7 @@
 """Tests for hermes_mobile.auth_provider.MobileDeviceProvider.
 
 Requires hermes on the import path:
-    PYTHONPATH=~/hermes-agent python -m pytest tests/ -x -q
+    PYTHONPATH=/path/to/hermes-agent python -m pytest tests/ -x -q
 """
 
 from __future__ import annotations
