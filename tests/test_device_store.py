@@ -1,7 +1,7 @@
 """Tests for hermes_mobile.device_store — pure-stdlib device registry.
 
 Run from the repo root:
-    PYTHONPATH=~/hermes-agent python -m pytest tests/ -x -q
+    PYTHONPATH=/path/to/hermes-agent python -m pytest tests/ -x -q
 (the store itself has no hermes imports; PYTHONPATH is needed for the
 auth-provider tests in this suite's sibling module).
 """

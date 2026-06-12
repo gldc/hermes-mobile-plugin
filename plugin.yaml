@@ -9,7 +9,7 @@ description: >
   mailboxes with redacted Expo push notifications, and a dashboard API
   (/api/plugins/mobile — push-token, mailbox sync, device self-info,
   declared in dashboard/manifest.json).
-author: gldc@users.noreply.github.com
+author: GianLuca D'Intino-Conte (https://github.com/gldc)
 requires_env: []
 optional_env: []
 provides_tools: []
