@@ -143,6 +143,21 @@ def set_push_token(body: PushTokenBody, request: Request) -> Dict[str, Any]:
     return {"ok": True}
 
 
+class SessionClaimBody(BaseModel):
+    session_id: str
+    session_key: str = ""
+
+
+@router.post("/session-claim")
+def claim_session(body: SessionClaimBody, request: Request) -> Dict[str, Any]:
+    """Bind the calling device to a session so session-stop hooks can target it."""
+    device_id = _require_device_id(request)
+    from .session_notify import get_registry
+
+    get_registry().claim(device_id, body.session_id.strip(), body.session_key.strip())
+    return {"ok": True}
+
+
 @router.get("/mailbox")
 def get_mailbox(request: Request) -> Dict[str, List[Dict[str, Any]]]:
     """Return and drain the calling device's queued messages."""
@@ -221,12 +236,14 @@ def list_memory_files() -> Dict[str, List[Dict[str, Any]]]:
         path = base / fixed
         try:
             st = path.stat()
-            files.append({
-                "name": fixed,
-                "size": st.st_size,
-                "mtime": st.st_mtime,
-                "exists": True,
-            })
+            files.append(
+                {
+                    "name": fixed,
+                    "size": st.st_size,
+                    "mtime": st.st_mtime,
+                    "exists": True,
+                }
+            )
         except FileNotFoundError:
             files.append({"name": fixed, "size": 0, "mtime": 0, "exists": False})
         except OSError as exc:

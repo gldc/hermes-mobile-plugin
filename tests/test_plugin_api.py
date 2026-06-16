@@ -148,6 +148,35 @@ def test_push_token_revoked_device_404(client, store, device):
 
 
 # ---------------------------------------------------------------------------
+# POST /session-claim
+# ---------------------------------------------------------------------------
+
+
+def test_session_claim_records_device(client, device):
+    from hermes_mobile.session_notify import get_registry
+
+    get_registry()._by_id.clear()
+    device_id, _ = device
+    resp = as_device(client, device_id).post(
+        "/api/plugins/mobile/session-claim",
+        json={"session_id": "SID", "session_key": "SKEY"},
+    )
+    assert resp.status_code == 200 and resp.json() == {"ok": True}
+    assert get_registry().resolve("SID") == device_id
+    assert get_registry().resolve("SKEY") == device_id
+    get_registry()._by_id.clear()
+
+
+def test_session_claim_403_without_session(client):
+    client.app.state.test_session = None  # loopback mode
+    resp = client.post(
+        "/api/plugins/mobile/session-claim",
+        json={"session_id": "SID", "session_key": "SKEY"},
+    )
+    assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
 # GET /mailbox
 # ---------------------------------------------------------------------------
 
