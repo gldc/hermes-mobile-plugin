@@ -135,6 +135,12 @@ def register_platform(ctx, store: DeviceStore) -> None:
         check_fn=check_requirements,
         install_hint="No extra packages needed (stdlib only)",
         emoji="📱",
+        # Lets cron / scheduled jobs deliver to the phone via ``deliver=mobile``.
+        # The gateway scheduler reads this env var for the default device id
+        # (set ``MOBILE_HOME_CHANNEL=<device_id>``); explicit ``mobile:<id>``
+        # send_message targets work without it. A device id is the chat_id here —
+        # see ``MobileAdapter.send`` and ``hermes mobile devices``.
+        cron_deliver_env_var="MOBILE_HOME_CHANNEL",
         platform_hint=(
             "You are sending to the user's Hermes mobile app inbox. "
             "Messages are delivered to an in-app mailbox (markdown is "

@@ -202,6 +202,11 @@ def test_register_platform_call_shape(store):
     assert callable(calls["adapter_factory"])
     assert calls["check_fn"]() is True
     assert calls["platform_hint"]
+    # Cron / scheduled delivery: the gateway scheduler only treats a plugin
+    # platform as a delivery target when it declares a home-channel env var
+    # (cron.scheduler._plugin_cron_env_var). MOBILE_HOME_CHANNEL=<device_id>
+    # selects the default device for `deliver=mobile` cron jobs.
+    assert calls["cron_deliver_env_var"] == "MOBILE_HOME_CHANNEL"
 
     built = calls["adapter_factory"](PlatformConfig())
     assert isinstance(built, MobileAdapter)
