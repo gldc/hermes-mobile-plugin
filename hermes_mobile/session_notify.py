@@ -65,3 +65,86 @@ _registry = SessionClaimRegistry()
 def get_registry() -> SessionClaimRegistry:
     """The process-wide registry shared by the session-claim route and hooks."""
     return _registry
+
+
+def _enabled() -> bool:
+    return (
+        os.getenv("MOBILE_NOTIFY_ON_SESSION_END", "1").strip().lower()
+        not in _DISABLED_VALUES
+    )
+
+
+def _is_cron_run() -> bool:
+    return os.getenv("HERMES_CRON_SESSION", "").strip() == "1"
+
+
+def _already_delivered_to_mobile() -> bool:
+    """HERMES_CRON_AUTO_DELIVER_PLATFORM is a ContextVar, not an env var — read it
+    via the gateway's session-context accessor (gateway is present in the gateway
+    process where cron's on_session_end fires). Lazy import keeps this module
+    gateway-free at import time."""
+    try:
+        from gateway.session_context import get_session_env
+    except Exception:
+        return False
+    return (
+        str(get_session_env("HERMES_CRON_AUTO_DELIVER_PLATFORM", "") or "")
+        .strip()
+        .lower()
+        == "mobile"
+    )
+
+
+class SessionNotifier:
+    def __init__(
+        self,
+        store: Optional[DeviceStore] = None,
+        push: Optional[ExpoPush] = None,
+        registry: Optional[SessionClaimRegistry] = None,
+    ) -> None:
+        self._store = store if store is not None else DeviceStore()
+        self._push = push if push is not None else ExpoPush()
+        self._registry = registry if registry is not None else get_registry()
+
+    def on_session_end(
+        self,
+        session_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        interrupted: bool = False,
+        **_,
+    ) -> None:
+        if not _enabled() or interrupted:
+            return
+        if _is_cron_run():
+            if _already_delivered_to_mobile():
+                return
+        elif self._registry.resolve(session_id, task_id) is None:
+            return
+        self._fan_out(SESSION_END_BODY, "session_end")
+
+    def on_pre_approval_request(
+        self, session_key: Optional[str] = None, surface: Optional[str] = None, **_
+    ) -> None:
+        if not _enabled() or surface != "gateway":
+            return
+        if self._registry.resolve(session_key) is None:
+            return
+        self._fan_out(APPROVAL_BODY, "approval_request")
+
+    def _tokened_devices(self) -> List[dict]:
+        try:
+            return [
+                d
+                for d in self._store.list_devices()
+                if not d.get("revoked") and d.get("push_token")
+            ]
+        except Exception:
+            logger.debug("hermes-mobile: list_devices failed", exc_info=True)
+            return []
+
+    def _fan_out(self, body: str, notif_type: str) -> None:
+        for d in self._tokened_devices():
+            try:
+                self._push.send(d["push_token"], body=body, data={"type": notif_type})
+            except Exception:
+                logger.debug("hermes-mobile: push send failed", exc_info=True)
