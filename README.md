@@ -110,6 +110,10 @@ stays silent (the app suppresses the banner while foreground). The app binds its
 device to each session via `POST /api/plugins/mobile/session-claim` so the
 gateway knows where to push. Enabled by default; disable with
 `MOBILE_NOTIFY_ON_SESSION_END=0`. Requires a gateway restart to load the hooks.
+To diagnose a missing push, enable `DEBUG` logging for
+`hermes_mobile.session_notify` — each ending/approval session logs whether it
+resolved to a device (a silent run that logs "unclaimed" is an attribution miss,
+not a push-delivery failure).
 
 ## Security notes
 

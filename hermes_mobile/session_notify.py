@@ -117,9 +117,27 @@ class SessionNotifier:
             return
         if _is_cron_run():
             if _already_delivered_to_mobile():
+                logger.debug(
+                    "hermes-mobile: session-notify cron end already delivered to "
+                    "mobile; skipping"
+                )
                 return
-        elif self._registry.resolve(session_id, task_id) is None:
-            return
+            logger.debug("hermes-mobile: session-notify cron end -> notifying devices")
+        else:
+            device_id = self._registry.resolve(session_id, task_id)
+            if device_id is None:
+                logger.debug(
+                    "hermes-mobile: session-notify session end unclaimed "
+                    "(session_id=%s task_id=%s); skipping",
+                    session_id,
+                    task_id,
+                )
+                return
+            logger.debug(
+                "hermes-mobile: session-notify session end claimed by device %s "
+                "-> notifying",
+                device_id,
+            )
         self._fan_out(SESSION_END_BODY, "session_end")
 
     def on_pre_approval_request(
@@ -127,8 +145,18 @@ class SessionNotifier:
     ) -> None:
         if not _enabled() or surface != "gateway":
             return
-        if self._registry.resolve(session_key) is None:
+        device_id = self._registry.resolve(session_key)
+        if device_id is None:
+            logger.debug(
+                "hermes-mobile: session-notify approval unclaimed "
+                "(session_key=%s); skipping",
+                session_key,
+            )
             return
+        logger.debug(
+            "hermes-mobile: session-notify approval claimed by device %s -> notifying",
+            device_id,
+        )
         self._fan_out(APPROVAL_BODY, "approval_request")
 
     def _tokened_devices(self) -> List[dict]:
