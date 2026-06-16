@@ -71,8 +71,35 @@ path for an expired or revoked refresh token.
 
 ### Sending to the phone
 
-Once paired, the device is a normal platform target — e.g. cron jobs or
-`send_message` with platform `mobile` and `chat_id = <device_id>`.
+Once paired, the device is a normal platform target whose **`chat_id` is the
+device id** (shown by `hermes mobile devices`, or in the app's Settings →
+Device). There are three ways to reach it:
+
+- **Explicit `send_message` target (no config):** address the device directly,
+  e.g. `send_message(target="mobile:<device_id>")`. This is the reliable path —
+  tell the agent the device id.
+- **Default device for bare `mobile` sends:** to let the agent use
+  `send_message(target="mobile")` without an id, set a home channel in
+  `~/.hermes/config.yaml`:
+
+  ```yaml
+  platforms:
+    mobile:
+      home_channel:
+        platform: mobile
+        chat_id: <device_id>
+        name: my-iphone
+  ```
+
+- **Cron / scheduled delivery (`deliver=mobile`):** set
+  `MOBILE_HOME_CHANNEL=<device_id>` in the gateway environment. The scheduler
+  reads it to pick the default device.
+
+> **Note:** `send_message(action="list")` does **not** enumerate paired devices
+> — `mobile` is outbound-only, so the channel directory (built from live
+> connections + inbound session history) has nothing to show for it. The agent
+> must be given the device id or a configured home channel; it can't discover
+> devices by listing. Get ids from `hermes mobile devices`.
 
 ## Security notes
 
