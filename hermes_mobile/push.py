@@ -54,13 +54,17 @@ class ExpoPush:
         token: str,
         title: str = DEFAULT_TITLE,
         body: Optional[str] = None,
+        data: Optional[dict] = None,
     ) -> bool:
         """POST one notification to Expo. Returns True when Expo accepted it.
 
         *body* defaults to the redacted :data:`DEFAULT_BODY`; pass content
-        only when the user opted in to previews. Failures (network, HTTP
-        error, Expo per-ticket error) are logged at WARNING and reported
-        as ``False`` — never raised.
+        only when the user opted in to previews. *data* (optional) is the
+        Expo ``data`` field carrying **routing only** — never content; it
+        rides redacted (e.g. ``{"type": "session_end"}``) so the app can
+        decide how to handle a notification without leaking anything.
+        Failures (network, HTTP error, Expo per-ticket error) are logged at
+        WARNING and reported as ``False`` — never raised.
         """
         if not token:
             return False
@@ -69,6 +73,8 @@ class ExpoPush:
             "title": title or DEFAULT_TITLE,
             "body": body if body is not None else DEFAULT_BODY,
         }
+        if data is not None:
+            payload["data"] = data
         try:
             status, response_text = self._transport(
                 EXPO_PUSH_URL,

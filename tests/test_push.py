@@ -75,9 +75,9 @@ def test_send_http_error_returns_false(caplog):
 
 def test_send_expo_ticket_error_returns_false(caplog):
     transport = RecordingTransport(
-        response=json.dumps({
-            "data": {"status": "error", "message": "DeviceNotRegistered"}
-        })
+        response=json.dumps(
+            {"data": {"status": "error", "message": "DeviceNotRegistered"}}
+        )
     )
     with caplog.at_level("WARNING"):
         assert ExpoPush(transport=transport).send("tok") is False
@@ -92,6 +92,30 @@ def test_send_list_shaped_ticket_ok():
 def test_send_garbage_response_returns_false():
     transport = RecordingTransport(response="<html>not json</html>")
     assert ExpoPush(transport=transport).send("tok") is False
+
+
+def test_send_includes_data_when_provided():
+    captured = {}
+
+    def transport(url, body, headers):
+        captured["payload"] = json.loads(body.decode("utf-8"))
+        return 200, json.dumps({"data": {"status": "ok"}})
+
+    ExpoPush(transport=transport).send(
+        "ExponentPushToken[x]", body="ready", data={"type": "session_end"}
+    )
+    assert captured["payload"]["data"] == {"type": "session_end"}
+
+
+def test_send_omits_data_key_when_none():
+    captured = {}
+
+    def transport(url, body, headers):
+        captured["payload"] = json.loads(body.decode("utf-8"))
+        return 200, json.dumps({"data": {"status": "ok"}})
+
+    ExpoPush(transport=transport).send("ExponentPushToken[x]")
+    assert "data" not in captured["payload"]
 
 
 # ---------------------------------------------------------------------------
