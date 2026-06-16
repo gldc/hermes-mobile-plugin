@@ -33,6 +33,7 @@ from hermes_mobile.session_notify import SessionNotifier, get_registry
 class RecordingPush:
     def __init__(self):
         self.sent = []
+
     def send(self, token, title="Hermes", body=None, data=None):
         self.sent.append({"token": token, "title": title, "body": body, "data": data})
         return True
@@ -106,6 +107,38 @@ def test_cron_dedup_when_delivered_to_mobile(store, monkeypatch):
     assert push.sent == []
 
 
+def test_already_delivered_reads_session_context_not_os_environ(monkeypatch):
+    """Real-path dedup reader: must go through gateway's get_session_env (a
+    ContextVar accessor), NOT os.getenv. HERMES_CRON_AUTO_DELIVER_PLATFORM is
+    set on the cron ContextVar, never in os.environ — regressing this back to
+    os.getenv would always read None and silently double-notify.
+
+    The function does a lazy ``from gateway.session_context import
+    get_session_env``; patching the attribute on that module before the call is
+    what the real code resolves. os.environ is deliberately left unset so the
+    test fails if the body ever reads it instead.
+    """
+    import gateway.session_context as sc
+    from hermes_mobile import session_notify
+
+    monkeypatch.delenv("HERMES_CRON_AUTO_DELIVER_PLATFORM", raising=False)
+
+    monkeypatch.setattr(
+        sc,
+        "get_session_env",
+        lambda name, default="": (
+            "mobile" if name == "HERMES_CRON_AUTO_DELIVER_PLATFORM" else default
+        ),
+    )
+    assert session_notify._already_delivered_to_mobile() is True
+
+    # Delivered elsewhere (or nowhere) -> not deduped.
+    monkeypatch.setattr(sc, "get_session_env", lambda name, default="": "slack")
+    assert session_notify._already_delivered_to_mobile() is False
+    monkeypatch.setattr(sc, "get_session_env", lambda name, default="": "")
+    assert session_notify._already_delivered_to_mobile() is False
+
+
 def test_disabled_toggle(store, monkeypatch):
     _tokened(store)
     monkeypatch.setenv("MOBILE_NOTIFY_ON_SESSION_END", "0")
@@ -155,7 +188,14 @@ def test_absorbs_injected_kwargs(store):
     get_registry().claim("dev-x", "SID")
     n = SessionNotifier(store=store, push=push, registry=get_registry())
     # invoke_hook injects telemetry_schema_version etc.
-    n.on_session_end(session_id="SID", task_id="SID", interrupted=False,
-                     turn_id="t", completed=True, model="m", platform="tui",
-                     telemetry_schema_version=1)
+    n.on_session_end(
+        session_id="SID",
+        task_id="SID",
+        interrupted=False,
+        turn_id="t",
+        completed=True,
+        model="m",
+        platform="tui",
+        telemetry_schema_version=1,
+    )
     assert len(push.sent) == 1
