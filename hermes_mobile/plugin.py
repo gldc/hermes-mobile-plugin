@@ -43,6 +43,21 @@ def register_all(ctx, store: Optional[DeviceStore] = None) -> None:
     #    guarantees the gateway package is importable.
     _register_platform(ctx, store)
 
+    # 4. Session-stop push notifier — pings paired devices when a
+    #    mobile-originated run stops / needs approval (and finished cron
+    #    runs), wiring the same in-process registry the /session-claim
+    #    route uses.
+    _register_session_notify(ctx, store)
+
+
+def _register_session_notify(ctx, store: DeviceStore) -> None:
+    from .session_notify import SessionNotifier, get_registry
+
+    notifier = SessionNotifier(store=store, registry=get_registry())
+    ctx.register_hook("on_session_end", notifier.on_session_end)
+    ctx.register_hook("pre_approval_request", notifier.on_pre_approval_request)
+    logger.info("hermes-mobile: registered session-stop notifier hooks")
+
 
 def _register_cli(ctx, store: DeviceStore) -> None:
     try:

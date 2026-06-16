@@ -28,6 +28,7 @@ class FakeCtx:
         self.auth_providers: list = []
         self.cli_commands: list = []
         self.platforms: list = []
+        self.hooks: dict = {}
 
     def register_dashboard_auth_provider(self, provider) -> None:
         self.auth_providers.append(provider)
@@ -35,16 +36,21 @@ class FakeCtx:
     def register_platform(self, **kwargs) -> None:
         self.platforms.append(kwargs)
 
+    def register_hook(self, name, cb) -> None:
+        self.hooks.setdefault(name, []).append(cb)
+
     def register_cli_command(
         self, name, help, setup_fn, handler_fn=None, description=""
     ):
-        self.cli_commands.append({
-            "name": name,
-            "help": help,
-            "setup_fn": setup_fn,
-            "handler_fn": handler_fn,
-            "description": description,
-        })
+        self.cli_commands.append(
+            {
+                "name": name,
+                "help": help,
+                "setup_fn": setup_fn,
+                "handler_fn": handler_fn,
+                "description": description,
+            }
+        )
 
 
 @pytest.fixture

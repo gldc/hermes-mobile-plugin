@@ -13,4 +13,4 @@ author: GianLuca D'Intino-Conte (https://github.com/gldc)
 requires_env: []
 optional_env: []
 provides_tools: []
-provides_hooks: []
+provides_hooks: [on_session_end, pre_approval_request]
