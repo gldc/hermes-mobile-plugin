@@ -101,6 +101,16 @@ Device). There are three ways to reach it:
 > must be given the device id or a configured home channel; it can't discover
 > devices by listing. Get ids from `hermes mobile devices`.
 
+### Session-stop notifications
+
+When a run you started from the app stops — finished, asked a question, or
+blocked on an approval — and you're not in the app, Hermes pushes a redacted
+"come back" notification (also for finished cron runs). The device you're using
+stays silent (the app suppresses the banner while foreground). The app binds its
+device to each session via `POST /api/plugins/mobile/session-claim` so the
+gateway knows where to push. Enabled by default; disable with
+`MOBILE_NOTIFY_ON_SESSION_END=0`. Requires a gateway restart to load the hooks.
+
 ## Security notes
 
 - **Private-network only.** The gateway is never exposed publicly:
