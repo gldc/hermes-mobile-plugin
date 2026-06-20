@@ -9,7 +9,7 @@ hermes-agent — no fork changes, nothing exposed to the public internet.
 
 | Surface | What it does |
 | --- | --- |
-| **Auth provider** (`mobile-device`) | Per-device dashboard sessions: ~15-minute access tokens, 30-day rotating refresh tokens, SHA-256 hashes only at rest, refresh-token **reuse detection** (a replayed rotated-out token revokes the whole device). Devices live in `~/.hermes/mobile/devices.json`. |
+| **Auth provider** (`mobile-device`) | Per-device dashboard sessions: ~15-minute access tokens, 30-day rotating refresh tokens, SHA-256 hashes only at rest, refresh-token **reuse detection** (a replayed rotated-out token revokes the whole device, with a short grace window for the immediately-prior token to tolerate concurrent/retried refreshes). Devices live in `~/.hermes/mobile/devices.json`. |
 | **CLI** (`hermes mobile`) | `pair` (mint a device + QR), `devices` (list), `revoke <device_id>`. |
 | **Platform adapter** (`mobile`) | Makes a paired phone a `send_message`/cron-delivery target: messages append to a per-device mailbox (`~/.hermes/mobile/mailbox/<device_id>.jsonl`) and fire a **redacted** Expo push ("New message from Hermes"). |
 | **Dashboard API** (`/api/plugins/mobile/…`) | `POST /push-token` (register the device's Expo push token), `GET /mailbox` (return + drain queued messages), `GET /me` (device self-info). These routes require a `mobile-device` session — other providers' sessions get 403. |
@@ -128,7 +128,10 @@ not a push-delivery failure).
 - **Tokens are hashed at rest.** `devices.json` stores SHA-256 hashes
   only, written atomically with `0600` permissions. Refresh tokens
   rotate on every use, and replaying a rotated-out token revokes the
-  device (stolen-token containment).
+  device (stolen-token containment) — except a replay of the
+  *immediately-prior* token within a short grace window (`GRACE_REUSE_SECONDS`,
+  30s), which re-rotates instead, so a client's concurrent/retried refresh
+  doesn't get locked out.
 - **Push is redacted by default.** Notification payloads transit Expo
   and APNs, so the adapter sends only "New message from Hermes" — never
   message content. The mailbox (fetched over the VPN) is the source of

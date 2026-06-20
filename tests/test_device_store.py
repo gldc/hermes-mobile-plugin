@@ -15,6 +15,7 @@ import pytest
 
 from hermes_mobile.device_store import (
     ACCESS_TTL_SECONDS,
+    GRACE_REUSE_SECONDS,
     REFRESH_TTL_SECONDS,
     DeviceStore,
     ExpiredRefreshTokenError,
@@ -150,10 +151,11 @@ def test_rotation_extends_refresh_window(store, clock):
 # ---------------------------------------------------------------------------
 
 
-def test_refresh_token_reuse_revokes_device(store):
+def test_refresh_token_reuse_revokes_device(store, clock):
     device_id, rt1 = store.create_device("phone")
     at, rt2, _ = store.rotate_refresh(rt1)
-    # Replaying the rotated-out RT is reuse → device revoked.
+    # Replaying the rotated-out RT after the grace window is reuse → revoked.
+    clock.advance(GRACE_REUSE_SECONDS + 1)
     with pytest.raises(ReusedRefreshTokenError):
         store.rotate_refresh(rt1)
     (dev,) = store.list_devices()
@@ -164,12 +166,56 @@ def test_refresh_token_reuse_revokes_device(store):
     assert store.verify_access(at) is None
 
 
-def test_reuse_error_carries_device_id(store):
+def test_reuse_error_carries_device_id(store, clock):
     device_id, rt1 = store.create_device("phone")
     store.rotate_refresh(rt1)
+    clock.advance(GRACE_REUSE_SECONDS + 1)  # past the rotation-race grace window
     with pytest.raises(ReusedRefreshTokenError) as excinfo:
         store.rotate_refresh(rt1)
     assert excinfo.value.device_id == device_id
+
+
+# ---------------------------------------------------------------------------
+# reuse detection — rotation-race grace window
+# ---------------------------------------------------------------------------
+
+
+def test_immediate_prev_replay_within_grace_rerotates(store):
+    # A duplicate/concurrent refresh that replays the immediately-prior RT
+    # within the grace window is benign (e.g. an out-of-process retry or a
+    # network-layer resend): it re-rotates instead of revoking the device.
+    _, rt1 = store.create_device("phone")
+    _, rt2, _ = store.rotate_refresh(rt1)
+    at3, rt3, _ = store.rotate_refresh(rt1)  # replay rt1 immediately (within grace)
+    assert rt3 and rt3 != rt2
+    assert store.verify_access(at3) is not None
+    (dev,) = store.list_devices()
+    assert dev["revoked"] is False
+
+
+def test_prev_replay_after_grace_revokes(store, clock):
+    # Outside the window, replaying the immediately-prior RT is still treated
+    # as theft and revokes the device.
+    _, rt1 = store.create_device("phone")
+    store.rotate_refresh(rt1)
+    clock.advance(GRACE_REUSE_SECONDS + 1)
+    with pytest.raises(ReusedRefreshTokenError):
+        store.rotate_refresh(rt1)
+    (dev,) = store.list_devices()
+    assert dev["revoked"] is True
+
+
+def test_older_prev_replay_revokes_even_within_grace(store):
+    # Grace forgives only the *immediately* prior RT. Replaying an older
+    # rotated-out RT (two+ rotations back) is still a compromise, even inside
+    # the window.
+    _, rt1 = store.create_device("phone")
+    _, rt2, _ = store.rotate_refresh(rt1)
+    store.rotate_refresh(rt2)  # rt1 is now prev[1], not the immediate prior
+    with pytest.raises(ReusedRefreshTokenError):
+        store.rotate_refresh(rt1)
+    (dev,) = store.list_devices()
+    assert dev["revoked"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -263,7 +309,8 @@ def test_state_persists_across_store_instances(store_path, clock):
     store2 = DeviceStore(path=store_path, clock=clock)
     record = store2.verify_access(at)
     assert record is not None and record["device_id"] == device_id
-    # Reuse detection survives reload too.
+    # Reuse detection survives reload too (replay past the grace window).
+    clock.advance(GRACE_REUSE_SECONDS + 1)
     with pytest.raises(ReusedRefreshTokenError):
         store2.rotate_refresh(rt)
 
