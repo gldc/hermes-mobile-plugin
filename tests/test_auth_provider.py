@@ -16,7 +16,11 @@ from hermes_cli.dashboard_auth import (
 )
 
 from hermes_mobile.auth_provider import PAIRING_DOCS_URL, MobileDeviceProvider
-from hermes_mobile.device_store import ACCESS_TTL_SECONDS, DeviceStore
+from hermes_mobile.device_store import (
+    ACCESS_TTL_SECONDS,
+    GRACE_REUSE_SECONDS,
+    DeviceStore,
+)
 
 
 class FakeClock:
@@ -122,10 +126,12 @@ def test_refresh_session_revoked_device_raises(provider, store, paired):
         provider.refresh_session(refresh_token=rt)
 
 
-def test_refresh_session_reuse_revokes_and_raises(provider, store, paired):
+def test_refresh_session_reuse_revokes_and_raises(provider, store, paired, clock):
     _, rt1 = paired
     session = provider.refresh_session(refresh_token=rt1)
-    # Replaying the QR token after rotation = reuse → RefreshExpiredError
+    # Replaying the QR token after rotation (and past the grace window) =
+    # reuse → RefreshExpiredError.
+    clock.advance(GRACE_REUSE_SECONDS + 1)
     with pytest.raises(RefreshExpiredError):
         provider.refresh_session(refresh_token=rt1)
     # ... and the whole device is dead, including the rotated RT.
