@@ -28,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import os
 import secrets
 import time
@@ -37,18 +38,23 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 ACCESS_TTL_SECONDS = 15 * 60  # ~15-minute access tokens
 REFRESH_TTL_SECONDS = 30 * 24 * 60 * 60  # 30-day rotating refresh tokens
 
-# Grace window for refresh-token rotation races. Replaying the *immediately*
-# prior RT within this window — a duplicate/retried request from the app, or a
-# network-layer resend that races the response that rotated the token — is
-# treated as a benign concurrent refresh and re-rotates rather than revoking
-# the device. Replays of older tokens, or of the immediately-prior token after
-# the window, are still treated as theft and revoke. Keep it short: it bounds
-# how long a genuinely stolen token could be replayed without detection.
-GRACE_REUSE_SECONDS = 30
+# Refresh-token reuse policy is *distance-based*, not time-based. Each rotation
+# supersedes the prior RT and retains its hash for reuse detection. Replaying
+# the *immediately* prior RT means the client is exactly one rotation behind —
+# it never durably received the last rotation's response (an aborted/lost
+# response, or the app suspended before persisting the new token) — so we
+# re-rotate forward instead of revoking, regardless of how much time has passed
+# (a phone can resume from background hours or days later and must self-heal).
+# Replaying an *older* rotated-out RT (two+ rotations back) is genuine reuse and
+# revokes the device. Trade-off: forgiving the one-behind token slightly weakens
+# detection of current-token theft — acceptable for a single-user client over a
+# private VPN; the re-rotation is logged so a sustained ping-pong stays visible.
 
 # How many rotated-out RT hashes to keep per device for reuse detection.
 # Reuse of anything newer than this window revokes the device.
 _MAX_PREV_HASHES = 50
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -159,14 +165,15 @@ class DeviceStore:
     def rotate_refresh(self, refresh_token: str) -> Tuple[str, str, int]:
         """Exchange a live RT for ``(access_token, refresh_token, expires_at)``.
 
-        Rotates both tokens. Replaying the immediately-prior RT within
-        ``GRACE_REUSE_SECONDS`` re-rotates instead of revoking (rotation-race
-        grace; see the constant). Raises:
+        Rotates both tokens. Replaying the immediately-prior RT re-rotates
+        instead of revoking (the client is one rotation behind — a lost/retried
+        response — and self-heals regardless of elapsed time; distance-based,
+        not time-based). Raises:
             UnknownRefreshTokenError — RT unrecognised or device revoked
             ExpiredRefreshTokenError — RT past its 30-day window
-            ReusedRefreshTokenError  — a rotated-out RT was replayed outside
-                                       the grace window (or an older one); the
-                                       device is revoked as a side effect
+            ReusedRefreshTokenError  — an older rotated-out RT (two+ rotations
+                                       back) was replayed; the device is revoked
+                                       as a side effect
         """
         h = _hash_token(refresh_token or "")
         data = self._load()
@@ -185,19 +192,21 @@ class DeviceStore:
             if prev_match:
                 prevs = dev.get("prev_refresh_token_hashes", [])
                 immediate_prior = bool(prevs) and _hashes_equal(prevs[0], h)
-                within_grace = (
-                    now - int(dev.get("last_refresh_at", 0)) <= GRACE_REUSE_SECONDS
-                )
-                if not (immediate_prior and within_grace):
-                    # Reuse of a rotated-out token — older than the immediate
-                    # prior, or replayed after the grace window: the chain is
-                    # compromised → revoke.
+                if not immediate_prior:
+                    # A rotated-out token older than the immediate prior (two+
+                    # rotations back): the chain is compromised → revoke.
                     dev["revoked"] = True
                     self._save(data)
                     raise ReusedRefreshTokenError(dev["device_id"])
-                # Otherwise: a benign concurrent/duplicate refresh that replayed
-                # the immediately-prior RT inside the grace window. Fall through
-                # and re-rotate instead of revoking.
+                # The immediately-prior RT: the client is exactly one rotation
+                # behind (it never durably received the last rotation's
+                # response). Re-rotate forward instead of revoking — independent
+                # of elapsed time. Logged so a sustained ping-pong stays visible.
+                logger.warning(
+                    "device %s replayed the immediately-prior refresh token; "
+                    "re-rotating (client was one rotation behind)",
+                    dev["device_id"],
+                )
             if int(dev.get("refresh_expires_at", 0)) <= now:
                 raise ExpiredRefreshTokenError("refresh token expired")
 

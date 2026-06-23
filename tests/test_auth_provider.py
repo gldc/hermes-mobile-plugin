@@ -18,7 +18,6 @@ from hermes_cli.dashboard_auth import (
 from hermes_mobile.auth_provider import PAIRING_DOCS_URL, MobileDeviceProvider
 from hermes_mobile.device_store import (
     ACCESS_TTL_SECONDS,
-    GRACE_REUSE_SECONDS,
     DeviceStore,
 )
 
@@ -126,17 +125,18 @@ def test_refresh_session_revoked_device_raises(provider, store, paired):
         provider.refresh_session(refresh_token=rt)
 
 
-def test_refresh_session_reuse_revokes_and_raises(provider, store, paired, clock):
+def test_refresh_session_reuse_revokes_and_raises(provider, store, paired):
     _, rt1 = paired
-    session = provider.refresh_session(refresh_token=rt1)
-    # Replaying the QR token after rotation (and past the grace window) =
-    # reuse → RefreshExpiredError.
-    clock.advance(GRACE_REUSE_SECONDS + 1)
+    s1 = provider.refresh_session(refresh_token=rt1)  # rt1 -> rt2
+    provider.refresh_session(
+        refresh_token=s1.refresh_token
+    )  # rt2 -> rt3; rt1 two behind
+    # Replaying a rotated-out RT older than the immediate prior = reuse → revoke.
     with pytest.raises(RefreshExpiredError):
         provider.refresh_session(refresh_token=rt1)
-    # ... and the whole device is dead, including the rotated RT.
+    # ... and the whole device is dead, including the current RT.
     with pytest.raises(RefreshExpiredError):
-        provider.refresh_session(refresh_token=session.refresh_token)
+        provider.refresh_session(refresh_token=s1.refresh_token)
     (dev,) = store.list_devices()
     assert dev["revoked"] is True
 
