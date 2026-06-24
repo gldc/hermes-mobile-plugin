@@ -154,7 +154,11 @@ def claim_session(body: SessionClaimBody, request: Request) -> Dict[str, Any]:
     device_id = _require_device_id(request)
     from .session_notify import get_registry
 
-    get_registry().claim(device_id, body.session_id.strip(), body.session_key.strip())
+    sid = body.session_id.strip()
+    skey = body.session_key.strip()
+    # session_key is the persistent/stored id the app routes on; prefer it as
+    # the canonical route id, falling back to session_id when absent.
+    get_registry().claim(device_id, sid, skey, route_id=(skey or sid))
     return {"ok": True}
 
 

@@ -36,26 +36,37 @@ class SessionClaimRegistry:
         self._ttl = ttl_seconds
         self._clock = clock
         self._lock = threading.Lock()
-        self._by_id: dict[str, tuple[str, float]] = {}
+        self._by_id: dict[str, tuple[str, str, float]] = {}
 
-    def claim(self, device_id: str, *ids: Optional[str]) -> None:
+    def claim(
+        self, device_id: str, *ids: Optional[str], route_id: Optional[str] = None
+    ) -> None:
+        """Bind every id in *ids* to *device_id* and the canonical *route_id*.
+
+        *route_id* is the stored/route session id the app navigates on (its
+        `session_key`); when omitted it falls back to the first non-empty id.
+        Retaining it lets `on_session_end` (which sees only the live id) emit
+        the stored id deterministically.
+        """
         if not device_id:
             return
+        route = (route_id or next((str(i) for i in ids if i), "")) or ""
         expires = self._clock() + self._ttl
         with self._lock:
             for i in ids:
                 if i:
-                    self._by_id[str(i)] = (device_id, expires)
+                    self._by_id[str(i)] = (device_id, route, expires)
 
-    def resolve(self, *ids: Optional[str]) -> Optional[str]:
+    def resolve(self, *ids: Optional[str]) -> Optional[tuple[str, str]]:
+        """First non-expired match → (device_id, route_id), else None."""
         now = self._clock()
         with self._lock:
             for i in ids:
                 if not i:
                     continue
                 hit = self._by_id.get(str(i))
-                if hit is not None and hit[1] > now:
-                    return hit[0]
+                if hit is not None and hit[2] > now:
+                    return (hit[0], hit[1])
             return None
 
 

@@ -199,3 +199,23 @@ def test_absorbs_injected_kwargs(store):
         telemetry_schema_version=1,
     )
     assert len(push.sent) == 1
+
+
+def test_registry_returns_canonical_route_id_even_when_matched_on_live_id():
+    from hermes_mobile.session_notify import SessionClaimRegistry
+
+    reg = SessionClaimRegistry()
+    # App claims with BOTH ids; session_key (STORED) is the route id.
+    reg.claim("dev-1", "LIVE-1", "STORED-1", route_id="STORED-1")
+    # Resolving on the LIVE id still yields the STORED route id.
+    assert reg.resolve("LIVE-1") == ("dev-1", "STORED-1")
+    assert reg.resolve("STORED-1") == ("dev-1", "STORED-1")
+    assert reg.resolve("nope") is None
+
+
+def test_registry_route_id_falls_back_to_first_id_when_unspecified():
+    from hermes_mobile.session_notify import SessionClaimRegistry
+
+    reg = SessionClaimRegistry()
+    reg.claim("dev-2", "ONLY-ID")
+    assert reg.resolve("ONLY-ID") == ("dev-2", "ONLY-ID")
