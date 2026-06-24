@@ -134,41 +134,49 @@ class SessionNotifier:
                 )
                 return
             logger.debug("hermes-mobile: session-notify cron end -> notifying devices")
-        else:
-            device_id = self._registry.resolve(session_id, task_id)
-            if device_id is None:
-                logger.debug(
-                    "hermes-mobile: session-notify session end unclaimed "
-                    "(session_id=%s task_id=%s); skipping",
-                    session_id,
-                    task_id,
-                )
-                return
+            self._fan_out(SESSION_END_BODY, "session_end")  # broadcast, no id
+            return
+
+        hit = self._registry.resolve(session_id, task_id)
+        if hit is None:
             logger.debug(
-                "hermes-mobile: session-notify session end claimed by device %s "
-                "-> notifying",
-                device_id,
+                "hermes-mobile: session-notify session end unclaimed "
+                "(session_id=%s task_id=%s); skipping",
+                session_id,
+                task_id,
             )
-        self._fan_out(SESSION_END_BODY, "session_end")
+            return
+        device_id, route_id = hit
+        logger.debug(
+            "hermes-mobile: session-notify session end claimed by device %s "
+            "-> notifying",
+            device_id,
+        )
+        self._fan_out(
+            SESSION_END_BODY, "session_end", device_id=device_id, session_id=route_id
+        )
 
     def on_pre_approval_request(
         self, session_key: Optional[str] = None, surface: Optional[str] = None, **_
     ) -> None:
         if not _enabled() or surface != "gateway":
             return
-        device_id = self._registry.resolve(session_key)
-        if device_id is None:
+        hit = self._registry.resolve(session_key)
+        if hit is None:
             logger.debug(
                 "hermes-mobile: session-notify approval unclaimed "
                 "(session_key=%s); skipping",
                 session_key,
             )
             return
+        device_id, route_id = hit
         logger.debug(
             "hermes-mobile: session-notify approval claimed by device %s -> notifying",
             device_id,
         )
-        self._fan_out(APPROVAL_BODY, "approval_request")
+        self._fan_out(
+            APPROVAL_BODY, "approval_request", device_id=device_id, session_id=route_id
+        )
 
     def _tokened_devices(self) -> List[dict]:
         try:
@@ -181,9 +189,30 @@ class SessionNotifier:
             logger.debug("hermes-mobile: list_devices failed", exc_info=True)
             return []
 
-    def _fan_out(self, body: str, notif_type: str) -> None:
+    def _fan_out(
+        self,
+        body: str,
+        notif_type: str,
+        *,
+        device_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> None:
+        """Send a redacted push. With *device_id* (a claimed session) target that
+        one device and include the route *session_id* in ``data``; otherwise
+        (cron) broadcast to every tokened device with id-less data."""
+        data = {"type": notif_type}
+        if session_id:
+            data["session_id"] = session_id
+        if device_id is not None:
+            token = self._store.get_push_token(device_id)
+            if token:
+                try:
+                    self._push.send(token, body=body, data=data)
+                except Exception:
+                    logger.debug("hermes-mobile: push send failed", exc_info=True)
+            return
         for d in self._tokened_devices():
             try:
-                self._push.send(d["push_token"], body=body, data={"type": notif_type})
+                self._push.send(d["push_token"], body=body, data=data)
             except Exception:
                 logger.debug("hermes-mobile: push send failed", exc_info=True)

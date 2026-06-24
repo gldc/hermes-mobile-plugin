@@ -5,10 +5,12 @@ def test_claim_and_resolve_by_either_id():
     clock = {"t": 1000.0}
     reg = SessionClaimRegistry(ttl_seconds=100, clock=lambda: clock["t"])
     reg.claim("dev1", "SID", "SKEY")
-    assert reg.resolve("SID") == "dev1"
-    assert reg.resolve("SKEY") == "dev1"
+    # resolve() now returns (device_id, route_id); route_id falls back to the
+    # first claimed id ("SID") when claim() is called without an explicit one.
+    assert reg.resolve("SID") == ("dev1", "SID")
+    assert reg.resolve("SKEY") == ("dev1", "SID")
     assert reg.resolve("nope") is None
-    assert reg.resolve(None, "", "SID") == "dev1"  # skips falsy, finds the hit
+    assert reg.resolve(None, "", "SID") == ("dev1", "SID")  # skips falsy, finds the hit
 
 
 def test_ttl_eviction():
@@ -58,13 +60,14 @@ def _tokened(store, name="phone", token="ExponentPushToken[abc]"):
 
 
 def test_session_end_pushes_for_claimed_session(store):
-    _tokened(store)
+    dev = _tokened(store)
     push = RecordingPush()
-    get_registry().claim("dev-x", "SID", "SKEY")
+    get_registry().claim(dev, "SID", "SKEY", route_id="SKEY")
     n = SessionNotifier(store=store, push=push, registry=get_registry())
     n.on_session_end(session_id="SID", task_id="SKEY", interrupted=False)
     assert len(push.sent) == 1
-    assert push.sent[0]["data"] == {"type": "session_end"}
+    assert push.sent[0]["token"] == "ExponentPushToken[abc]"
+    assert push.sent[0]["data"] == {"type": "session_end", "session_id": "SKEY"}
     assert push.sent[0]["body"] == "Your session is ready — tap to check"
 
 
@@ -92,6 +95,7 @@ def test_session_end_pushes_for_cron(store, monkeypatch):
     n = SessionNotifier(store=store, push=push, registry=get_registry())
     n.on_session_end(session_id="whatever", task_id="x", interrupted=False)
     assert len(push.sent) == 1
+    assert push.sent[0]["data"] == {"type": "session_end"}  # cron: broadcast, no id
 
 
 def test_cron_dedup_when_delivered_to_mobile(store, monkeypatch):
@@ -150,13 +154,14 @@ def test_disabled_toggle(store, monkeypatch):
 
 
 def test_approval_pushes_for_claimed_gateway_session(store):
-    _tokened(store)
+    dev = _tokened(store)
     push = RecordingPush()
-    get_registry().claim("dev-x", "SID", "SKEY")
+    get_registry().claim(dev, "SID", "SKEY", route_id="SKEY")
     n = SessionNotifier(store=store, push=push, registry=get_registry())
     n.on_pre_approval_request(session_key="SKEY", surface="gateway")
     assert len(push.sent) == 1
-    assert push.sent[0]["data"] == {"type": "approval_request"}
+    assert push.sent[0]["token"] == "ExponentPushToken[abc]"
+    assert push.sent[0]["data"] == {"type": "approval_request", "session_id": "SKEY"}
     assert push.sent[0]["body"] == "Hermes needs your approval"
 
 
@@ -169,23 +174,26 @@ def test_approval_skips_non_gateway_surface(store):
     assert push.sent == []
 
 
-def test_fan_out_skips_revoked_and_tokenless(store):
+def test_fan_out_skips_revoked_and_tokenless(store, monkeypatch):
+    # The revoked/tokenless skip lives on the BROADCAST (cron) path; a claimed
+    # send is targeted at a single device via get_push_token instead.
     _tokened(store, name="good")
     store.create_device("no-token")
     rid = _tokened(store, name="revoked", token="ExponentPushToken[r]")
     store.revoke(rid)
+    monkeypatch.setenv("HERMES_CRON_SESSION", "1")
     push = RecordingPush()
-    get_registry().claim("dev-x", "SID")
     n = SessionNotifier(store=store, push=push, registry=get_registry())
-    n.on_session_end(session_id="SID", task_id="SID", interrupted=False)
+    n.on_session_end(session_id="whatever", task_id="x", interrupted=False)
     assert len(push.sent) == 1
     assert push.sent[0]["token"] == "ExponentPushToken[abc]"
+    assert push.sent[0]["data"] == {"type": "session_end"}
 
 
 def test_absorbs_injected_kwargs(store):
-    _tokened(store)
+    dev = _tokened(store)
     push = RecordingPush()
-    get_registry().claim("dev-x", "SID")
+    get_registry().claim(dev, "SID")
     n = SessionNotifier(store=store, push=push, registry=get_registry())
     # invoke_hook injects telemetry_schema_version etc.
     n.on_session_end(
@@ -219,3 +227,20 @@ def test_registry_route_id_falls_back_to_first_id_when_unspecified():
     reg = SessionClaimRegistry()
     reg.claim("dev-2", "ONLY-ID")
     assert reg.resolve("ONLY-ID") == ("dev-2", "ONLY-ID")
+
+
+def test_session_end_emits_stored_id_and_targets_only_the_claiming_device(store):
+    # Two devices, each claims a distinct session.
+    dev_a = _tokened(store, name="A", token="ExponentPushToken[A]")
+    dev_b = _tokened(store, name="B", token="ExponentPushToken[B]")
+    push = RecordingPush()
+    reg = get_registry()
+    reg.claim(dev_a, "LIVE-A", "STORED-A", route_id="STORED-A")
+    reg.claim(dev_b, "LIVE-B", "STORED-B", route_id="STORED-B")
+    n = SessionNotifier(store=store, push=push, registry=reg)
+    # The gateway hands the hook the LIVE id; we must still emit the STORED id
+    # and target ONLY the claiming device.
+    n.on_session_end(session_id="LIVE-A", task_id=None, interrupted=False)
+    assert len(push.sent) == 1
+    assert push.sent[0]["token"] == "ExponentPushToken[A]"  # only A, never B
+    assert push.sent[0]["data"] == {"type": "session_end", "session_id": "STORED-A"}
