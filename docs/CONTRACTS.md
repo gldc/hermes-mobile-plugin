@@ -656,10 +656,13 @@ SESSION_RT_COOKIE = "hermes_session_rt"
    new_session = provider.refresh_session(refresh_token=refresh_token)
    ```
 
-   (middleware.py:342). First provider returning a Session wins;
-   `RefreshExpiredError` stops the chain (an RT belongs to exactly one
-   provider) and forces re-login; `ProviderError` logs and forces clean
-   re-login (middleware.py:343-364).
+   (middleware.py:342). First provider returning a Session wins. Since
+   hermes 0.18.2 core `continue`s past `RefreshExpiredError` and tries
+   the remaining providers (a provider raises it for foreign tokens too,
+   so it cannot prove ownership); only when every provider rejects the
+   token is re-login forced. Pre-0.18.2 core stopped the chain at the
+   first `RefreshExpiredError` — the bug this plugin's (since-removed)
+   `refresh_patch` worked around.
 4. On success the middleware sets `request.state.session = new_session`,
    serves the request, and **re-sets rotated cookies** on the response
    via `set_session_cookies(response, access_token=...,

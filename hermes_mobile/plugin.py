@@ -34,18 +34,6 @@ def register_all(ctx, store: Optional[DeviceStore] = None) -> None:
     ctx.register_dashboard_auth_provider(provider)
     logger.info("hermes-mobile: registered '%s' auth provider", provider.name)
 
-    # Work around an upstream core bug: dashboard auth's `_attempt_refresh`
-    # stops at the first provider that raises RefreshExpiredError, so an
-    # earlier provider (e.g. `basic`) shadows this `mobile-device` provider
-    # and mobile token refresh always fails ("revoked or expired" in the app).
-    # Patch it to try all providers. Defensive + idempotent — see refresh_patch.
-    try:
-        from .refresh_patch import install as _install_refresh_patch
-
-        _install_refresh_patch()
-    except Exception:  # never let the workaround break plugin registration
-        logger.debug("hermes-mobile: refresh-patch install raised", exc_info=True)
-
     # 2. CLI commands (`hermes mobile pair|devices|revoke`).
     _register_cli(ctx, store)
 
