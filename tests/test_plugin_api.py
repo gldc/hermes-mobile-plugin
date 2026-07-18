@@ -162,8 +162,8 @@ def test_session_claim_records_device(client, device):
         json={"session_id": "SID", "session_key": "SKEY"},
     )
     assert resp.status_code == 200 and resp.json() == {"ok": True}
-    assert get_registry().resolve("SID") == device_id
-    assert get_registry().resolve("SKEY") == device_id
+    assert get_registry().resolve("SID") == (device_id, "SKEY")
+    assert get_registry().resolve("SKEY") == (device_id, "SKEY")
     get_registry()._by_id.clear()
 
 
