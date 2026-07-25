@@ -54,8 +54,12 @@ class MobileAdapter(BasePlatformAdapter):
 
     # ---- required abstract surface -----------------------------------------
 
-    async def connect(self) -> bool:
+    async def connect(self, *, is_reconnect: bool = False) -> bool:
         # Nothing to connect: delivery is filesystem + outbound HTTPS.
+        # ``is_reconnect`` only matters to adapters holding a server-side
+        # update queue (Telegram's Bot API); the mailbox is durable on disk,
+        # so nothing to preserve or drop either way. Accepting the kwarg is
+        # mandatory: the gateway always passes it.
         return True
 
     async def disconnect(self) -> None:

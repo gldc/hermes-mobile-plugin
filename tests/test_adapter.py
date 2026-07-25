@@ -10,13 +10,14 @@ PlatformEntry first.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 
 import pytest
 
 from gateway.config import PlatformConfig
 from gateway.platform_registry import PlatformEntry, platform_registry
-from gateway.platforms.base import SendResult
+from gateway.platforms.base import BasePlatformAdapter, SendResult
 
 from hermes_mobile import adapter as adapter_mod
 from hermes_mobile.adapter import MobileAdapter, check_requirements, register_platform
@@ -82,6 +83,36 @@ def run(coro):
 def test_connect_true_disconnect_noop(mobile):
     assert run(mobile.connect()) is True
     assert run(mobile.disconnect()) is None
+
+
+def test_connect_accepts_is_reconnect(mobile):
+    """The gateway always passes ``is_reconnect=`` — cold boot and watcher alike.
+
+    ``GatewayService._connect_adapter_with_timeout`` calls
+    ``adapter.connect(is_reconnect=...)`` unconditionally (gateway/run.py),
+    so an adapter that omits the kwarg raises TypeError and is never added to
+    ``self.adapters`` — the platform then retries forever with backoff and
+    every agent→device message is dropped.
+    """
+    assert run(mobile.connect(is_reconnect=False)) is True
+    assert run(mobile.connect(is_reconnect=True)) is True
+
+
+def test_connect_signature_matches_core_contract(mobile):
+    """Guard against future drift in BasePlatformAdapter.connect's kwargs."""
+    core_kwonly = {
+        name
+        for name, p in inspect.signature(BasePlatformAdapter.connect).parameters.items()
+        if p.kind is inspect.Parameter.KEYWORD_ONLY
+    }
+    ours = inspect.signature(MobileAdapter.connect).parameters
+    missing = {
+        name
+        for name in core_kwonly
+        if name not in ours
+        and not any(p.kind is inspect.Parameter.VAR_KEYWORD for p in ours.values())
+    }
+    assert not missing, f"MobileAdapter.connect() is missing core kwargs: {missing}"
 
 
 def test_platform_identity(mobile):
