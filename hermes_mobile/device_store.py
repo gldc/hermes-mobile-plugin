@@ -444,7 +444,14 @@ class DeviceStore:
 
     def _ensure_dir(self) -> None:
         directory = self._path.parent
+        existed = directory.exists()
         directory.mkdir(parents=True, exist_ok=True)
+        if not existed:
+            # Root just created this directory (fresh install/reset): it is
+            # root-owned, which would make _match_dir_owner's later checks on
+            # *this* directory's owner (for the lock file and the store itself)
+            # see uid 0 and silently no-op. Hand it to its own parent's owner now.
+            _match_dir_owner(directory, directory.parent)
         try:
             os.chmod(directory, 0o700)
         except OSError:

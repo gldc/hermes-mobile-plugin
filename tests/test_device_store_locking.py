@@ -296,3 +296,43 @@ def test_root_writes_hand_files_to_the_store_dir_owner(store_path, monkeypatch):
     assert "devices.json.lock" in names
     assert any(n.startswith(".devices.json.") and n.endswith(".tmp") for n in names)
     assert all((uid, gid) == (st.st_uid, st.st_gid) for _, uid, gid in calls)
+
+
+def test_root_ensure_dir_hands_a_freshly_created_store_dir_to_its_parent_owner(
+    store_dir, store_path, monkeypatch
+):
+    # Fresh install / reset: the store directory itself doesn't exist yet, only
+    # its parent does. If root creates it via mkdir, the new dir is root-owned,
+    # and _match_dir_owner(lock_path, store_dir) would then see st_uid == 0 and
+    # silently never chown anything written inside it.
+    store_dir.parent.mkdir(parents=True, exist_ok=True)
+    assert not store_dir.exists()
+    parent_stat = store_dir.parent.stat()
+    calls = []
+    monkeypatch.setattr(ds.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        ds.os, "chown", lambda p, uid, gid: calls.append((Path(p).name, uid, gid))
+    )
+    s = DeviceStore(path=store_path)
+    s.create_device("a")
+    names = {c[0] for c in calls}
+    assert store_dir.name in names
+    assert all(
+        (uid, gid) == (parent_stat.st_uid, parent_stat.st_gid)
+        for name, uid, gid in calls
+        if name == store_dir.name
+    )
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires real root to chown")
+def test_root_ensure_dir_hands_a_freshly_created_store_dir_to_its_parent_owner_as_root(
+    store_dir, store_path
+):
+    store_dir.parent.mkdir(parents=True, exist_ok=True)
+    os.chown(store_dir.parent, 10000, 10000)
+    assert not store_dir.exists()
+    s = DeviceStore(path=store_path)
+    s.create_device("a")
+    for p in (store_dir, store_path, s.lock_path):
+        st = p.stat()
+        assert (st.st_uid, st.st_gid) == (10000, 10000), p
