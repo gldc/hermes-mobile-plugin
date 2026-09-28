@@ -244,3 +244,24 @@ def test_session_end_emits_stored_id_and_targets_only_the_claiming_device(store)
     assert len(push.sent) == 1
     assert push.sent[0]["token"] == "ExponentPushToken[A]"  # only A, never B
     assert push.sent[0]["data"] == {"type": "session_end", "session_id": "STORED-A"}
+
+
+# ---------------------------------------------------------------------------
+# coalesced approvals (spec §9.1)
+# ---------------------------------------------------------------------------
+
+
+def test_coalesced_approval_follower_does_not_push(store):
+    dev = _tokened(store)
+    push = RecordingPush()
+    get_registry().claim(dev, "SID", "SKEY", route_id="SKEY")
+    n = SessionNotifier(store=store, push=push, registry=get_registry())
+    n.on_pre_approval_request(
+        session_key="SKEY", surface="gateway", command="rm -rf /tmp/x", coalesced=True
+    )
+    assert push.sent == []
+    # The leader (no coalesced flag) still pushes.
+    n.on_pre_approval_request(
+        session_key="SKEY", surface="gateway", command="rm -rf /tmp/x"
+    )
+    assert len(push.sent) == 1

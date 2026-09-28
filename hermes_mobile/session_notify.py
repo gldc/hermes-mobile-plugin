@@ -157,9 +157,23 @@ class SessionNotifier:
         )
 
     def on_pre_approval_request(
-        self, session_key: Optional[str] = None, surface: Optional[str] = None, **_
+        self,
+        session_key: Optional[str] = None,
+        surface: Optional[str] = None,
+        coalesced: bool = False,
+        **_,
     ) -> None:
         if not _enabled() or surface != "gateway":
+            return
+        if coalesced:
+            # A follower of an identical pending prompt (hermes coalesces parallel
+            # duplicates; the leader already pushed). Both v2026.8.18 and v2026.9.24
+            # fire this with coalesced=True.
+            logger.debug(
+                "hermes-mobile: session-notify approval coalesced "
+                "(session_key=%s); skipping",
+                session_key,
+            )
             return
         hit = self._registry.resolve(session_key)
         if hit is None:
