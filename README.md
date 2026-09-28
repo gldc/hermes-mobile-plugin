@@ -107,10 +107,10 @@ When a run you started from the app stops — finished, blocked on an approval, 
 the agent asks you a question (`clarify`) — and you're not in the app, Hermes
 pushes a redacted "come back" notification (also for finished cron runs):
 "Your session is ready — tap to check", "Hermes needs your approval", or
-"Hermes has a question". A tap opens that session; the question or approval card
-is restored there on resume. The device you're using stays silent (the app
-suppresses the banner while foreground). The app binds its device to each session
-via `POST /api/plugins/mobile/session-claim` so the gateway knows where to push.
+"Hermes has a question". A tap opens that session. The device you're using stays
+silent (the app suppresses the banner while foreground). The app binds its device
+to each session via `POST /api/plugins/mobile/session-claim` so the gateway knows
+where to push.
 Duplicate approval prompts that hermes coalesces push once, and repeated clarify
 questions in one session push at most once per 30 seconds. There is no push for
 sudo or secret prompts (hermes exposes no hook for them); those cards appear only
@@ -143,10 +143,14 @@ not a push-delivery failure).
   process-wide lock plus an `flock` on the sidecar `devices.json.lock`, so token
   refreshes (threaded at hermes ≥ 0.21) and `hermes mobile pair`/`revoke` from
   another process cannot lose each other's updates. A crashed writer never leaves
-  a stale lock. When root writes the store (e.g. `docker exec`), the files are
-  handed back to the store directory's owner, and a store directory that root
-  creates is handed to its parent's owner, so the gateway user can still read
-  them.
+  a stale lock. If the CLI runs as root (e.g. `HERMES_DOCKER_EXEC_AS_ROOT=1`; the
+  image's exec shim normally runs `docker exec … hermes` as the gateway user), the
+  files are handed back to the store directory's owner, and a store directory that
+  root creates is handed to its parent's owner, so the gateway user can still read
+  them. A write that cannot take the lock within 10 s fails as a transient error
+  (the phone retries; it is never asked to re-pair); if the lock file cannot be
+  opened or `flock` is unsupported, the store logs a WARNING and serializes
+  writers in-process only.
 - **Push is redacted by default.** Notification payloads transit Expo
   and APNs, so the adapter sends only "New message from Hermes" — never
   message content. The mailbox (fetched over the VPN) is the source of
