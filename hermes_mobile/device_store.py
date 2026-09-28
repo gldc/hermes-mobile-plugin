@@ -139,6 +139,7 @@ def _match_dir_owner(fd: int, directory: Path, name: Path) -> None:
     path could be swapped for a symlink to a root-owned file between open and chown.
     Only a directory or a single-link regular file is handed over, so a hardlink the
     agent planted to a root-owned file is refused (WARNING) rather than given away.
+    Callers pass only what they just created; this check is defence in depth.
     """
     if os.geteuid() != 0:
         return
@@ -433,20 +434,42 @@ class DeviceStore:
             thread_lock.release()
 
     def _open_lock_file(self) -> Optional[int]:
+        """Open :attr:`lock_path`, or ``None`` (WARNING) to degrade to the thread lock.
+
+        Only a lock file this call created (``O_EXCL``) is handed to the store owner:
+        an existing one may be a root-owned file the agent renamed into place.
+        """
         self._ensure_dir()
-        try:
-            # O_NOFOLLOW: a planted symlink (ELOOP) degrades below, never opens through.
-            fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-        except OSError as exc:
-            logger.warning(
-                "hermes-mobile: cannot open %s (%s); cross-process locking disabled "
-                "for this write",
-                self.lock_path,
-                exc,
-            )
-            return None
-        _match_dir_owner(fd, self._path.parent, self.lock_path)
-        return fd
+        exc: Optional[OSError] = None
+        for _ in range(2):  # one retry: the file can vanish between the two opens
+            try:
+                # O_NOFOLLOW: a planted symlink (EEXIST, then ELOOP) degrades below.
+                fd = os.open(
+                    self.lock_path,
+                    os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                )
+            except FileExistsError:
+                try:
+                    return os.open(self.lock_path, os.O_RDWR | os.O_NOFOLLOW)
+                except FileNotFoundError as missing:
+                    exc = missing
+                    continue
+                except OSError as other:
+                    exc = other
+            except OSError as other:
+                exc = other
+            else:
+                _match_dir_owner(fd, self._path.parent, self.lock_path)
+                return fd
+            break
+        logger.warning(
+            "hermes-mobile: cannot open %s (%s); cross-process locking disabled "
+            "for this write",
+            self.lock_path,
+            exc,
+        )
+        return None
 
     def _flock(self, fd: int, deadline: float) -> None:
         while True:

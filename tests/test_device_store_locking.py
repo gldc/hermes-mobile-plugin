@@ -396,7 +396,7 @@ def test_root_mode_never_chowns_through_a_symlinked_lock_file(
 
 
 def test_root_mode_never_chowns_a_hardlinked_lock_file(
-    store_dir, store_path, monkeypatch, caplog
+    store_dir, store_path, monkeypatch
 ):
     # O_NOFOLLOW stops a symlink, not a hardlink: a planted devices.json.lock that
     # is a second name for a root-owned file opens fine, and must not be handed over.
@@ -415,16 +415,112 @@ def test_root_mode_never_chowns_a_hardlinked_lock_file(
         pytest.skip(f"no hardlinks on this filesystem: {exc}")
     calls = _spy_chowns(monkeypatch)
     s = DeviceStore(path=store_path)
-    with caplog.at_level(logging.WARNING, logger="hermes_mobile.device_store"):
-        device_id, _ = s.create_device("a")
+    device_id, _ = s.create_device("a")
     assert s.get_device(device_id)["name"] == "a"
     assert victim_ino not in {ino for _, ino, _, _ in calls}
     assert store_path.stat().st_ino in {ino for _, ino, _, _ in calls}
+    assert victim.read_text() == "root-only\n"
+
+
+def test_match_dir_owner_refuses_a_multi_link_file(store_dir, monkeypatch, caplog):
+    # Defence in depth behind the O_EXCL lock open: should any caller ever pass an
+    # fd for a file with a second name, it is refused (WARNING), not handed over.
+    store_dir.mkdir(parents=True, exist_ok=True)
+    if os.geteuid() == 0:
+        os.chown(store_dir, 10000, 10000)  # per-test dir; see the rename test
+    victim = store_dir / "victim"
+    victim.write_text("root-only\n")
+    try:
+        os.link(victim, store_dir / "second-name")
+    except OSError as exc:  # e.g. Unraid shfs with hard-link support off
+        pytest.skip(f"no hardlinks on this filesystem: {exc}")
+    calls = _spy_chowns(monkeypatch)
+    fd = os.open(victim, os.O_RDONLY)
+    try:
+        with caplog.at_level(logging.WARNING, logger="hermes_mobile.device_store"):
+            ds._match_dir_owner(fd, store_dir, victim)
+    finally:
+        os.close(fd)
+    assert calls == []
     assert any(
-        r.levelno == logging.WARNING and str(lock) in r.getMessage()
+        r.levelno == logging.WARNING and str(victim) in r.getMessage()
         for r in caplog.records
     )
-    assert victim.read_text() == "root-only\n"
+
+
+def test_root_mode_never_chowns_a_lock_file_renamed_into_place(
+    store_dir, store_path, monkeypatch
+):
+    # nlink == 1 stops link(), not rename(): the agent owns the store dir, so it can
+    # rename() a root-owned single-link file from any agent-writable directory on
+    # the same filesystem into devices.json.lock. Only a lock file this write
+    # created may be handed over.
+    store_dir.mkdir(parents=True, exist_ok=True)
+    if os.geteuid() == 0:
+        # Real root: a root-owned store dir would no-op every chown and make the
+        # inode assertion vacuous. store_dir is per-test, so re-owning it is safe.
+        os.chown(store_dir, 10000, 10000)
+    elsewhere = store_dir / "elsewhere"
+    elsewhere.mkdir()
+    victim = elsewhere / "victim"
+    victim.write_text("root-only\n")
+    victim_ino = victim.stat().st_ino
+    lock = store_dir / "devices.json.lock"
+    os.rename(victim, lock)
+    calls = _spy_chowns(monkeypatch)
+    s = DeviceStore(path=store_path)
+    device_id, _ = s.create_device("a")
+    assert s.get_device(device_id)["name"] == "a"
+    targets = {ino for _, ino, _, _ in calls}
+    assert victim_ino not in targets
+    assert store_path.stat().st_ino in targets  # the tmp file is still handed back
+    assert lock.stat().st_ino == victim_ino
+    assert lock.read_text() == "root-only\n"
+
+
+@pytest.mark.parametrize("vanishes", [1, 2])
+def test_lock_file_vanishing_between_opens_retries_once_then_degrades(
+    store_path, monkeypatch, caplog, vanishes
+):
+    # Another writer can unlink devices.json.lock between the O_EXCL open (EEXIST)
+    # and the plain open (ENOENT): retry once, then degrade to the thread lock.
+    s = DeviceStore(path=store_path)
+    s.create_device("first")  # the lock file now exists
+    real_open = os.open
+    plain_opens = []
+
+    def flaky_open(path, flags, *args, **kwargs):
+        if str(path) == str(s.lock_path) and not flags & os.O_CREAT:
+            plain_opens.append(flags)
+            if len(plain_opens) <= vanishes:
+                raise FileNotFoundError(errno.ENOENT, "vanished", str(path))
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(ds.os, "open", flaky_open)
+    with caplog.at_level(logging.WARNING, logger="hermes_mobile.device_store"):
+        device_id, _ = s.create_device("second")
+    assert s.get_device(device_id)["name"] == "second"
+    assert len(plain_opens) == 2
+    degraded = "cross-process locking disabled" in caplog.text
+    assert degraded == (vanishes == 2)
+
+
+def test_root_mode_hands_back_the_lock_file_only_when_it_creates_it(
+    store_dir, store_path, monkeypatch
+):
+    store_dir.mkdir(parents=True, exist_ok=True)
+    if os.geteuid() == 0:
+        os.chown(store_dir, 10000, 10000)  # per-test dir; see the rename test
+    calls = _spy_chowns(monkeypatch)
+    s = DeviceStore(path=store_path)
+    s.create_device("a")
+    lock_ino = s.lock_path.stat().st_ino
+    assert lock_ino in {ino for _, ino, _, _ in calls}  # created here: handed back
+    calls.clear()
+    s.create_device("b")
+    targets = {ino for _, ino, _, _ in calls}
+    assert lock_ino not in targets  # already there: left alone
+    assert store_path.stat().st_ino in targets
 
 
 @pytest.mark.skipif(
