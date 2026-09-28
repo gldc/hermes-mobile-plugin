@@ -22,10 +22,14 @@ Token model (mirrors the dashboard auth middleware's cookie semantics):
 Only SHA-256 hashes of tokens are stored at rest; the file is written
 atomically (a unique ``mkstemp`` sibling, fsynced, then ``os.replace``) with
 owner-only permissions.
+
+Writers are serialized by a process-wide lock keyed by the resolved path plus an
+exclusive ``flock`` on the ``devices.json.lock`` sidecar (cross-process: the CLI).
 """
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import hmac
 import json
@@ -125,6 +129,21 @@ def _path_lock(path: Path) -> threading.Lock:
         return lock
 
 
+def _match_dir_owner(path: Path, directory: Path) -> None:
+    """When root writes the store (``docker exec`` is root on dc1-1), hand the file to the
+    store directory's owner so the uid-10000 dashboard can still open it. No-op otherwise."""
+    if os.geteuid() != 0:
+        return
+    try:
+        st = os.stat(directory)
+        if st.st_uid != 0:
+            os.chown(path, st.st_uid, st.st_gid)
+    except OSError as exc:
+        logger.warning(
+            "hermes-mobile: could not chown %s to the store owner: %s", path, exc
+        )
+
+
 def default_devices_path() -> Path:
     """``<hermes home>/mobile/devices.json``.
 
@@ -159,6 +178,11 @@ class DeviceStore:
         self._path = Path(path) if path is not None else default_devices_path()
         self._clock = clock
         self._lock_timeout = float(lock_timeout)
+
+    @property
+    def lock_path(self) -> Path:
+        """Sidecar ``flock`` target (``devices.json.lock``) next to the store."""
+        return self._path.with_name(self._path.name + ".lock")
 
     # ---- public API --------------------------------------------------------
 
@@ -359,16 +383,64 @@ class DeviceStore:
 
         Threads: the process-wide lock for the resolved path (0.21.5 refreshes in a
         threadpool, and the dashboard holds several DeviceStore instances).
+        Processes: an exclusive ``flock`` on :attr:`lock_path` (``hermes mobile
+        pair``/``revoke``). The kernel drops a flock when its holder dies, so a
+        crash cannot leave a stale lock. Both waits share ONE deadline, so the total
+        wait never exceeds ``lock_timeout`` (at 8.18 refresh runs on the event loop).
         """
+        deadline = time.monotonic() + self._lock_timeout
         thread_lock = _path_lock(self._path)
         if not thread_lock.acquire(timeout=self._lock_timeout):
             raise DeviceStoreError(
                 f"timed out after {self._lock_timeout:g}s waiting for {self._path}"
             )
         try:
-            yield
+            fd = self._open_lock_file()
+            try:
+                if fd is not None:
+                    self._flock(fd, deadline)
+                yield
+            finally:
+                if fd is not None:
+                    os.close(fd)  # closing the fd releases the flock
         finally:
             thread_lock.release()
+
+    def _open_lock_file(self) -> Optional[int]:
+        self._ensure_dir()
+        try:
+            fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError as exc:
+            logger.warning(
+                "hermes-mobile: cannot open %s (%s); cross-process locking disabled "
+                "for this write",
+                self.lock_path,
+                exc,
+            )
+            return None
+        _match_dir_owner(self.lock_path, self._path.parent)
+        return fd
+
+    def _flock(self, fd: int, deadline: float) -> None:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise DeviceStoreError(
+                        f"timed out after {self._lock_timeout:g}s waiting for "
+                        f"{self.lock_path}"
+                    ) from None
+                time.sleep(_LOCK_POLL_SECONDS)
+            except OSError as exc:
+                logger.warning(
+                    "hermes-mobile: flock unsupported on %s (%s); cross-process "
+                    "locking disabled for this write",
+                    self.lock_path,
+                    exc,
+                )
+                return
 
     def _ensure_dir(self) -> None:
         directory = self._path.parent
@@ -390,6 +462,7 @@ class DeviceStore:
                 fh.write("\n")
                 fh.flush()
                 os.fsync(fh.fileno())
+            _match_dir_owner(Path(tmp_name), self._path.parent)
             os.replace(tmp_name, self._path)
         except BaseException:
             try:
