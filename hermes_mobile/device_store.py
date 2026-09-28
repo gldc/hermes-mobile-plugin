@@ -20,7 +20,8 @@ Token model (mirrors the dashboard auth middleware's cookie semantics):
   hermes' rotating-RT conventions.
 
 Only SHA-256 hashes of tokens are stored at rest; the file is written
-atomically with owner-only permissions.
+atomically (a unique ``mkstemp`` sibling, fsynced, then ``os.replace``) with
+owner-only permissions.
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ import json
 import logging
 import os
 import secrets
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -321,22 +323,30 @@ class DeviceStore:
             raise DeviceStoreError(f"malformed device store at {self._path}")
         return data
 
-    def _save(self, data: Dict[str, Any]) -> None:
+    def _ensure_dir(self) -> None:
         directory = self._path.parent
         directory.mkdir(parents=True, exist_ok=True)
         try:
             os.chmod(directory, 0o700)
         except OSError:
             pass
-        tmp = self._path.with_name(f".{self._path.name}.{os.getpid()}.tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+
+    def _save(self, data: Dict[str, Any]) -> None:
+        """Atomically replace the store: unique ``mkstemp`` sibling (0600), fsync, rename."""
+        self._ensure_dir()
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{self._path.name}.", suffix=".tmp", dir=str(self._path.parent)
+        )
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump(data, fh, indent=2, sort_keys=True)
                 fh.write("\n")
-            os.replace(tmp, self._path)
-        finally:
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_name, self._path)
+        except BaseException:
             try:
-                os.unlink(tmp)
-            except FileNotFoundError:
+                os.unlink(tmp_name)
+            except OSError:
                 pass
+            raise
