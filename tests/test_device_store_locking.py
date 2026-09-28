@@ -395,6 +395,38 @@ def test_root_mode_never_chowns_through_a_symlinked_lock_file(
     assert victim_ino not in {ino for _, ino, _, _ in calls}
 
 
+def test_root_mode_never_chowns_a_hardlinked_lock_file(
+    store_dir, store_path, monkeypatch, caplog
+):
+    # O_NOFOLLOW stops a symlink, not a hardlink: a planted devices.json.lock that
+    # is a second name for a root-owned file opens fine, and must not be handed over.
+    store_dir.mkdir(parents=True, exist_ok=True)
+    if os.geteuid() == 0:
+        # Real root: a root-owned store dir would no-op every chown and make the
+        # inode assertion vacuous. store_dir is per-test, so re-owning it is safe.
+        os.chown(store_dir, 10000, 10000)
+    victim = store_dir / "victim"
+    victim.write_text("root-only\n")
+    victim_ino = victim.stat().st_ino
+    lock = store_dir / "devices.json.lock"
+    try:
+        os.link(victim, lock)
+    except OSError as exc:  # e.g. Unraid shfs with hard-link support off
+        pytest.skip(f"no hardlinks on this filesystem: {exc}")
+    calls = _spy_chowns(monkeypatch)
+    s = DeviceStore(path=store_path)
+    with caplog.at_level(logging.WARNING, logger="hermes_mobile.device_store"):
+        device_id, _ = s.create_device("a")
+    assert s.get_device(device_id)["name"] == "a"
+    assert victim_ino not in {ino for _, ino, _, _ in calls}
+    assert store_path.stat().st_ino in {ino for _, ino, _, _ in calls}
+    assert any(
+        r.levelno == logging.WARNING and str(lock) in r.getMessage()
+        for r in caplog.records
+    )
+    assert victim.read_text() == "root-only\n"
+
+
 @pytest.mark.skipif(
     os.geteuid() == 0,
     reason="real root creates the store dir root-owned, so nothing is handed back",

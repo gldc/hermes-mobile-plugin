@@ -36,6 +36,7 @@ import json
 import logging
 import os
 import secrets
+import stat
 import tempfile
 import threading
 import time
@@ -136,10 +137,24 @@ def _match_dir_owner(fd: int, directory: Path, name: Path) -> None:
 
     Always by fd, never by path: the store dir is writable by the agent's uid, so a
     path could be swapped for a symlink to a root-owned file between open and chown.
+    Only a directory or a single-link regular file is handed over, so a hardlink the
+    agent planted to a root-owned file is refused (WARNING) rather than given away.
     """
     if os.geteuid() != 0:
         return
     try:
+        fst = os.fstat(fd)
+        if not (
+            stat.S_ISDIR(fst.st_mode)
+            or (stat.S_ISREG(fst.st_mode) and fst.st_nlink == 1)
+        ):
+            logger.warning(
+                "hermes-mobile: refusing to chown %s to the store owner "
+                "(not a single-link regular file or directory: nlink=%d)",
+                name,
+                fst.st_nlink,
+            )
+            return
         st = os.stat(directory)
         if st.st_uid != 0:
             os.fchown(fd, st.st_uid, st.st_gid)
