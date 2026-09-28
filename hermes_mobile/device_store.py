@@ -33,9 +33,11 @@ import logging
 import os
 import secrets
 import tempfile
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 ACCESS_TTL_SECONDS = 15 * 60  # ~15-minute access tokens
 REFRESH_TTL_SECONDS = 30 * 24 * 60 * 60  # 30-day rotating refresh tokens
@@ -55,6 +57,11 @@ REFRESH_TTL_SECONDS = 30 * 24 * 60 * 60  # 30-day rotating refresh tokens
 # How many rotated-out RT hashes to keep per device for reuse detection.
 # Reuse of anything newer than this window revokes the device.
 _MAX_PREV_HASHES = 50
+
+#: How long a mutator waits for the store lock before raising DeviceStoreError
+#: (the auth provider turns that into a transient ProviderError, never a re-pair).
+LOCK_TIMEOUT_SECONDS = 10.0
+_LOCK_POLL_SECONDS = 0.02
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +110,21 @@ def _hashes_equal(a: str, b: str) -> bool:
     return hmac.compare_digest(a.encode("ascii"), b.encode("ascii"))
 
 
+# One lock per resolved store file, shared by every DeviceStore in the process.
+_PATH_LOCKS: Dict[str, threading.Lock] = {}
+_PATH_LOCKS_GUARD = threading.Lock()
+
+
+def _path_lock(path: Path) -> threading.Lock:
+    """The process-wide lock for *path* (symlinks and relative spellings resolve to one key)."""
+    key = str(Path(path).resolve())
+    with _PATH_LOCKS_GUARD:
+        lock = _PATH_LOCKS.get(key)
+        if lock is None:
+            lock = _PATH_LOCKS[key] = threading.Lock()
+        return lock
+
+
 def default_devices_path() -> Path:
     """``<hermes home>/mobile/devices.json``.
 
@@ -132,9 +154,11 @@ class DeviceStore:
         self,
         path: Optional[Path] = None,
         clock: Callable[[], float] = time.time,
+        lock_timeout: float = LOCK_TIMEOUT_SECONDS,
     ) -> None:
         self._path = Path(path) if path is not None else default_devices_path()
         self._clock = clock
+        self._lock_timeout = float(lock_timeout)
 
     # ---- public API --------------------------------------------------------
 
@@ -147,21 +171,22 @@ class DeviceStore:
         device_id = secrets.token_hex(8)
         refresh_token = secrets.token_urlsafe(32)
         now = self._now()
-        data = self._load()
-        data["devices"][device_id] = {
-            "device_id": device_id,
-            "name": str(name),
-            "created_at": now,
-            "revoked": False,
-            "refresh_token_hash": _hash_token(refresh_token),
-            "refresh_expires_at": now + REFRESH_TTL_SECONDS,
-            "prev_refresh_token_hashes": [],
-            "access_token_hash": "",
-            "access_expires_at": 0,
-            "last_refresh_at": 0,
-            "push_token": "",
-        }
-        self._save(data)
+        with self._locked():
+            data = self._load()
+            data["devices"][device_id] = {
+                "device_id": device_id,
+                "name": str(name),
+                "created_at": now,
+                "revoked": False,
+                "refresh_token_hash": _hash_token(refresh_token),
+                "refresh_expires_at": now + REFRESH_TTL_SECONDS,
+                "prev_refresh_token_hashes": [],
+                "access_token_hash": "",
+                "access_expires_at": 0,
+                "last_refresh_at": 0,
+                "push_token": "",
+            }
+            self._save(data)
         return device_id, refresh_token
 
     def rotate_refresh(self, refresh_token: str) -> Tuple[str, str, int]:
@@ -176,58 +201,60 @@ class DeviceStore:
             ReusedRefreshTokenError  — an older rotated-out RT (two+ rotations
                                        back) was replayed; the device is revoked
                                        as a side effect
+            DeviceStoreError         — the store lock could not be taken in time
         """
-        h = _hash_token(refresh_token or "")
-        data = self._load()
-        now = self._now()
+        with self._locked():
+            h = _hash_token(refresh_token or "")
+            data = self._load()
+            now = self._now()
 
-        for dev in data["devices"].values():
-            current_match = _hashes_equal(dev["refresh_token_hash"], h)
-            prev_match = any(
-                _hashes_equal(prev, h)
-                for prev in dev.get("prev_refresh_token_hashes", [])
-            )
-            if not (current_match or prev_match):
-                continue
-            if dev.get("revoked"):
-                raise UnknownRefreshTokenError("device is revoked")
-            if prev_match:
-                prevs = dev.get("prev_refresh_token_hashes", [])
-                immediate_prior = bool(prevs) and _hashes_equal(prevs[0], h)
-                if not immediate_prior:
-                    # A rotated-out token older than the immediate prior (two+
-                    # rotations back): the chain is compromised → revoke.
-                    dev["revoked"] = True
-                    self._save(data)
-                    raise ReusedRefreshTokenError(dev["device_id"])
-                # The immediately-prior RT: the client is exactly one rotation
-                # behind (it never durably received the last rotation's
-                # response). Re-rotate forward instead of revoking — independent
-                # of elapsed time. Logged so a sustained ping-pong stays visible.
-                logger.warning(
-                    "device %s replayed the immediately-prior refresh token; "
-                    "re-rotating (client was one rotation behind)",
-                    dev["device_id"],
+            for dev in data["devices"].values():
+                current_match = _hashes_equal(dev["refresh_token_hash"], h)
+                prev_match = any(
+                    _hashes_equal(prev, h)
+                    for prev in dev.get("prev_refresh_token_hashes", [])
                 )
-            if int(dev.get("refresh_expires_at", 0)) <= now:
-                raise ExpiredRefreshTokenError("refresh token expired")
+                if not (current_match or prev_match):
+                    continue
+                if dev.get("revoked"):
+                    raise UnknownRefreshTokenError("device is revoked")
+                if prev_match:
+                    prevs = dev.get("prev_refresh_token_hashes", [])
+                    immediate_prior = bool(prevs) and _hashes_equal(prevs[0], h)
+                    if not immediate_prior:
+                        # A rotated-out token older than the immediate prior (two+
+                        # rotations back): the chain is compromised → revoke.
+                        dev["revoked"] = True
+                        self._save(data)
+                        raise ReusedRefreshTokenError(dev["device_id"])
+                    # The immediately-prior RT: the client is exactly one rotation
+                    # behind (it never durably received the last rotation's
+                    # response). Re-rotate forward instead of revoking — independent
+                    # of elapsed time. Logged so a sustained ping-pong stays visible.
+                    logger.warning(
+                        "device %s replayed the immediately-prior refresh token; "
+                        "re-rotating (client was one rotation behind)",
+                        dev["device_id"],
+                    )
+                if int(dev.get("refresh_expires_at", 0)) <= now:
+                    raise ExpiredRefreshTokenError("refresh token expired")
 
-            access_token = secrets.token_urlsafe(32)
-            new_refresh = secrets.token_urlsafe(32)
-            expires_at = now + ACCESS_TTL_SECONDS
-            prev = [dev["refresh_token_hash"]] + list(
-                dev.get("prev_refresh_token_hashes", [])
-            )
-            dev["prev_refresh_token_hashes"] = prev[:_MAX_PREV_HASHES]
-            dev["refresh_token_hash"] = _hash_token(new_refresh)
-            dev["refresh_expires_at"] = now + REFRESH_TTL_SECONDS
-            dev["access_token_hash"] = _hash_token(access_token)
-            dev["access_expires_at"] = expires_at
-            dev["last_refresh_at"] = now
-            self._save(data)
-            return access_token, new_refresh, expires_at
+                access_token = secrets.token_urlsafe(32)
+                new_refresh = secrets.token_urlsafe(32)
+                expires_at = now + ACCESS_TTL_SECONDS
+                prev = [dev["refresh_token_hash"]] + list(
+                    dev.get("prev_refresh_token_hashes", [])
+                )
+                dev["prev_refresh_token_hashes"] = prev[:_MAX_PREV_HASHES]
+                dev["refresh_token_hash"] = _hash_token(new_refresh)
+                dev["refresh_expires_at"] = now + REFRESH_TTL_SECONDS
+                dev["access_token_hash"] = _hash_token(access_token)
+                dev["access_expires_at"] = expires_at
+                dev["last_refresh_at"] = now
+                self._save(data)
+                return access_token, new_refresh, expires_at
 
-        raise UnknownRefreshTokenError("refresh token not recognised")
+            raise UnknownRefreshTokenError("refresh token not recognised")
 
     def verify_access(self, access_token: str) -> Optional[Dict[str, Any]]:
         """Return a copy of the device record for a live AT, else ``None``.
@@ -251,27 +278,29 @@ class DeviceStore:
         return None
 
     def revoke(self, device_id: str) -> None:
-        """Revoke a device by id. No-op for unknown ids; never raises."""
-        data = self._load()
-        dev = data["devices"].get(device_id)
-        if dev is None:
-            return
-        dev["revoked"] = True
-        self._save(data)
+        """Revoke a device by id. No-op for unknown ids."""
+        with self._locked():
+            data = self._load()
+            dev = data["devices"].get(device_id)
+            if dev is None:
+                return
+            dev["revoked"] = True
+            self._save(data)
 
     def revoke_by_refresh(self, refresh_token: str) -> bool:
         """Best-effort revoke by RT (current or rotated-out). True if found."""
-        h = _hash_token(refresh_token or "")
-        data = self._load()
-        for dev in data["devices"].values():
-            if _hashes_equal(dev["refresh_token_hash"], h) or any(
-                _hashes_equal(prev, h)
-                for prev in dev.get("prev_refresh_token_hashes", [])
-            ):
-                dev["revoked"] = True
-                self._save(data)
-                return True
-        return False
+        with self._locked():
+            h = _hash_token(refresh_token or "")
+            data = self._load()
+            for dev in data["devices"].values():
+                if _hashes_equal(dev["refresh_token_hash"], h) or any(
+                    _hashes_equal(prev, h)
+                    for prev in dev.get("prev_refresh_token_hashes", [])
+                ):
+                    dev["revoked"] = True
+                    self._save(data)
+                    return True
+            return False
 
     def get_device(self, device_id: str) -> Optional[Dict[str, Any]]:
         """Copy of one device record by id, or ``None`` if unknown."""
@@ -286,13 +315,14 @@ class DeviceStore:
         stored as-is (it is needed verbatim to call Expo's push API; it
         is not a credential against this gateway).
         """
-        data = self._load()
-        dev = data["devices"].get(device_id)
-        if dev is None or dev.get("revoked"):
-            return False
-        dev["push_token"] = str(token or "")
-        self._save(data)
-        return True
+        with self._locked():
+            data = self._load()
+            dev = data["devices"].get(device_id)
+            if dev is None or dev.get("revoked"):
+                return False
+            dev["push_token"] = str(token or "")
+            self._save(data)
+            return True
 
     def get_push_token(self, device_id: str) -> Optional[str]:
         """The device's Expo push token, or ``None`` if unset/unknown/revoked."""
@@ -322,6 +352,23 @@ class DeviceStore:
         if not isinstance(data, dict) or not isinstance(data.get("devices"), dict):
             raise DeviceStoreError(f"malformed device store at {self._path}")
         return data
+
+    @contextmanager
+    def _locked(self) -> Iterator[None]:
+        """Hold the store for one load→modify→save. Do not nest.
+
+        Threads: the process-wide lock for the resolved path (0.21.5 refreshes in a
+        threadpool, and the dashboard holds several DeviceStore instances).
+        """
+        thread_lock = _path_lock(self._path)
+        if not thread_lock.acquire(timeout=self._lock_timeout):
+            raise DeviceStoreError(
+                f"timed out after {self._lock_timeout:g}s waiting for {self._path}"
+            )
+        try:
+            yield
+        finally:
+            thread_lock.release()
 
     def _ensure_dir(self) -> None:
         directory = self._path.parent
