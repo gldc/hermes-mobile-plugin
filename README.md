@@ -103,16 +103,22 @@ Device). There are three ways to reach it:
 
 ### Session-stop notifications
 
-When a run you started from the app stops — finished, asked a question, or
-blocked on an approval — and you're not in the app, Hermes pushes a redacted
-"come back" notification (also for finished cron runs). The device you're using
-stays silent (the app suppresses the banner while foreground). The app binds its
-device to each session via `POST /api/plugins/mobile/session-claim` so the
-gateway knows where to push. Enabled by default; disable with
+When a run you started from the app stops — finished, blocked on an approval, or
+the agent asks you a question (`clarify`) — and you're not in the app, Hermes
+pushes a redacted "come back" notification (also for finished cron runs):
+"Your session is ready — tap to check", "Hermes needs your approval", or
+"Hermes has a question". A tap opens that session; the question or approval card
+is restored there on resume. The device you're using stays silent (the app
+suppresses the banner while foreground). The app binds its device to each session
+via `POST /api/plugins/mobile/session-claim` so the gateway knows where to push.
+Duplicate approval prompts that hermes coalesces push once, and repeated clarify
+questions in one session push at most once per 30 seconds. There is no push for
+sudo or secret prompts (hermes exposes no hook for them); those cards appear only
+while the chat is open. Enabled by default; disable with
 `MOBILE_NOTIFY_ON_SESSION_END=0`. Requires a gateway restart to load the hooks.
 To diagnose a missing push, enable `DEBUG` logging for
-`hermes_mobile.session_notify` — each ending/approval session logs whether it
-resolved to a device (a silent run that logs "unclaimed" is an attribution miss,
+`hermes_mobile.session_notify` — each ending/approval/clarify session logs whether
+it resolved to a device (a silent run that logs "unclaimed" is an attribution miss,
 not a push-delivery failure).
 
 ## Security notes
@@ -133,6 +139,14 @@ not a push-delivery failure).
   the client is one rotation behind (a lost/retried response, or the app
   resuming from background before it persisted the new token), so it
   self-heals regardless of elapsed time rather than getting locked out.
+- **Concurrent writers are serialized.** Every change to `devices.json` holds a
+  process-wide lock plus an `flock` on the sidecar `devices.json.lock`, so token
+  refreshes (threaded at hermes ≥ 0.21) and `hermes mobile pair`/`revoke` from
+  another process cannot lose each other's updates. A crashed writer never leaves
+  a stale lock. When root writes the store (e.g. `docker exec`), the files are
+  handed back to the store directory's owner, and a store directory that root
+  creates is handed to its parent's owner, so the gateway user can still read
+  them.
 - **Push is redacted by default.** Notification payloads transit Expo
   and APNs, so the adapter sends only "New message from Hermes" — never
   message content. The mailbox (fetched over the VPN) is the source of
@@ -144,8 +158,14 @@ not a push-delivery failure).
 ## Development
 
 ```sh
-# hermes-agent source checkout required on PYTHONPATH (read-only):
-PYTHONPATH=/path/to/hermes-agent python -m pytest tests/ -q
+# hermes-agent source on PYTHONPATH (read-only); run at BOTH supported tags:
+for T in v2026.8.18 v2026.9.24; do
+  D="$HOME/.cache/hermes-core/${T}"; mkdir -p "$D"
+  git -C /path/to/hermes-agent archive "${T}" | tar -x -C "$D"
+  PYTHONPATH="$D" python -m pytest tests/ -q
+done
+# Locking tests on another filesystem (e.g. Unraid shfs):
+HERMES_MOBILE_LOCKTEST_DIR=/mnt/user/appdata/hermes-locktest python -m pytest tests/test_device_store_locking.py -q
 ```
 
 Layout: `hermes_mobile/` (device_store, auth_provider, cli, push,
