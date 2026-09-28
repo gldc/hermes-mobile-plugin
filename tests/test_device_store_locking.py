@@ -273,6 +273,32 @@ def test_flock_unsupported_degrades_to_thread_lock(store_path, monkeypatch, capl
     assert "cross-process locking disabled" in caplog.text
 
 
+def _spy_chowns(monkeypatch):
+    """Pretend to be root and record (without performing) every chown the store tries.
+
+    Each call is ``(kind, target inode, uid, gid)``: fchown resolves its fd with fstat,
+    chown follows the path like the real call, lchown does not.
+    """
+    calls = []
+    monkeypatch.setattr(ds.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        ds.os,
+        "chown",
+        lambda p, uid, gid, **kw: calls.append(("chown", os.stat(p).st_ino, uid, gid)),
+    )
+    monkeypatch.setattr(
+        ds.os,
+        "lchown",
+        lambda p, uid, gid: calls.append(("lchown", os.lstat(p).st_ino, uid, gid)),
+    )
+    monkeypatch.setattr(
+        ds.os,
+        "fchown",
+        lambda fd, uid, gid: calls.append(("fchown", os.fstat(fd).st_ino, uid, gid)),
+    )
+    return calls
+
+
 def test_root_writes_hand_files_to_the_store_dir_owner(store_path, monkeypatch):
     # `docker exec` is root on dc1-1; a root-owned 0600 devices.json or lock file
     # would lock the uid-10000 dashboard out of every device.
@@ -285,19 +311,21 @@ def test_root_writes_hand_files_to_the_store_dir_owner(store_path, monkeypatch):
             st = p.stat()
             assert (st.st_uid, st.st_gid) == (10000, 10000), p
         return
-    calls = []
-    monkeypatch.setattr(ds.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(
-        ds.os, "chown", lambda p, uid, gid: calls.append((Path(p).name, uid, gid))
-    )
+    calls = _spy_chowns(monkeypatch)
     s.create_device("a")
     st = store_path.parent.stat()
-    names = {c[0] for c in calls}
-    assert "devices.json.lock" in names
-    assert any(n.startswith(".devices.json.") and n.endswith(".tmp") for n in names)
-    assert all((uid, gid) == (st.st_uid, st.st_gid) for _, uid, gid in calls)
+    assert [c for c in calls if c[0] != "fchown"] == []  # by fd only, never by path
+    targets = {ino for _, ino, _, _ in calls}
+    assert s.lock_path.stat().st_ino in targets
+    assert store_path.stat().st_ino in targets  # the tmp file that became the store
+    assert all((uid, gid) == (st.st_uid, st.st_gid) for _, _, uid, gid in calls)
 
 
+@pytest.mark.skipif(
+    os.geteuid() == 0,
+    reason="real root creates `home` root-owned, so the hand-back rightly no-ops; "
+    "the _as_root twin covers real root",
+)
 def test_root_ensure_dir_hands_a_freshly_created_store_dir_to_its_parent_owner(
     store_dir, monkeypatch
 ):
@@ -316,19 +344,15 @@ def test_root_ensure_dir_hands_a_freshly_created_store_dir_to_its_parent_owner(
     store_path = mobile_dir / "devices.json"
     assert not mobile_dir.exists()
     home_stat = home.stat()
-    calls = []
-    monkeypatch.setattr(ds.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(
-        ds.os, "chown", lambda p, uid, gid: calls.append((Path(p).name, uid, gid))
-    )
+    calls = _spy_chowns(monkeypatch)
     s = DeviceStore(path=store_path)
     s.create_device("a")
-    names = {c[0] for c in calls}
-    assert mobile_dir.name in names
+    assert [c for c in calls if c[0] != "fchown"] == []  # by fd only, never by path
+    dir_calls = [c for c in calls if c[1] == mobile_dir.stat().st_ino]
+    assert dir_calls
     assert all(
         (uid, gid) == (home_stat.st_uid, home_stat.st_gid)
-        for name, uid, gid in calls
-        if name == mobile_dir.name
+        for _, _, uid, gid in dir_calls
     )
 
 
@@ -347,3 +371,73 @@ def test_root_ensure_dir_hands_a_freshly_created_store_dir_to_its_parent_owner_a
     for p in (mobile_dir, store_path, s.lock_path):
         st = p.stat()
         assert (st.st_uid, st.st_gid) == (10000, 10000), p
+
+
+def test_root_mode_never_chowns_through_a_symlinked_lock_file(
+    store_dir, store_path, monkeypatch, caplog
+):
+    # The store dir is writable by the agent's uid. A planted devices.json.lock ->
+    # <root-owned file> must be neither opened through nor handed to that uid.
+    store_dir.mkdir(parents=True, exist_ok=True)
+    victim = store_dir / "victim"
+    victim.write_text("root-only\n")
+    victim_ino = victim.stat().st_ino
+    lock = store_dir / "devices.json.lock"
+    lock.symlink_to(victim)
+    calls = _spy_chowns(monkeypatch)
+    s = DeviceStore(path=store_path)
+    with caplog.at_level(logging.WARNING, logger="hermes_mobile.device_store"):
+        device_id, _ = s.create_device("a")
+    assert s.get_device(device_id)["name"] == "a"
+    assert "cross-process locking disabled" in caplog.text
+    assert victim.read_text() == "root-only\n"
+    assert lock.is_symlink() and os.readlink(lock) == str(victim)
+    assert victim_ino not in {ino for _, ino, _, _ in calls}
+
+
+@pytest.mark.skipif(
+    os.geteuid() == 0,
+    reason="real root creates the store dir root-owned, so nothing is handed back",
+)
+def test_root_mode_hands_the_tmp_file_back_before_it_replaces_the_store(
+    store_path, monkeypatch
+):
+    store_path.parent.mkdir(parents=True, exist_ok=True)
+    events = _spy_chowns(monkeypatch)
+    real_replace = os.replace
+
+    def replace(src, dst, *args, **kwargs):
+        events.append(("replace", os.stat(src).st_ino, None, None))
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(ds.os, "replace", replace)
+    DeviceStore(path=store_path).create_device("a")
+    ino = store_path.stat().st_ino
+    order = [(kind, target) for kind, target, _, _ in events]
+    assert ("fchown", ino) in order and ("replace", ino) in order
+    assert order.index(("fchown", ino)) < order.index(("replace", ino))
+
+
+def test_thread_lock_timeout_is_a_store_error(store_path):
+    # Another thread of this process holds the store: give up after lock_timeout.
+    lock = ds._path_lock(store_path)
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with lock:
+            held.set()
+            release.wait(10)
+
+    holder = threading.Thread(target=hold, name="holder")
+    holder.start()
+    try:
+        assert held.wait(5)
+        impatient = DeviceStore(path=store_path, lock_timeout=0.2)
+        started = time.monotonic()
+        with pytest.raises(DeviceStoreError, match=r"timed out.*devices\.json$"):
+            impatient.create_device("while-held")
+        assert time.monotonic() - started < 2
+        assert not impatient.lock_path.exists()  # gave up before the flock stage
+    finally:
+        release.set()
+        holder.join(5)

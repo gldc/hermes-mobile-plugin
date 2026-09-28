@@ -129,18 +129,23 @@ def _path_lock(path: Path) -> threading.Lock:
         return lock
 
 
-def _match_dir_owner(path: Path, directory: Path) -> None:
-    """When root writes the store (``docker exec`` is root on dc1-1), hand the file to the
-    store directory's owner so the uid-10000 dashboard can still open it. No-op otherwise."""
+def _match_dir_owner(fd: int, directory: Path, name: Path) -> None:
+    """When root writes the store (e.g. ``HERMES_DOCKER_EXEC_AS_ROOT=1``), hand the open
+    file *fd* (``name``, for the log) to *directory*'s owner so the uid-10000 dashboard
+    can still open it. No-op unless euid 0, or when *directory* is root-owned.
+
+    Always by fd, never by path: the store dir is writable by the agent's uid, so a
+    path could be swapped for a symlink to a root-owned file between open and chown.
+    """
     if os.geteuid() != 0:
         return
     try:
         st = os.stat(directory)
         if st.st_uid != 0:
-            os.chown(path, st.st_uid, st.st_gid)
+            os.fchown(fd, st.st_uid, st.st_gid)
     except OSError as exc:
         logger.warning(
-            "hermes-mobile: could not chown %s to the store owner: %s", path, exc
+            "hermes-mobile: could not chown %s to the store owner: %s", name, exc
         )
 
 
@@ -402,14 +407,21 @@ class DeviceStore:
                 yield
             finally:
                 if fd is not None:
-                    os.close(fd)  # closing the fd releases the flock
+                    # Unlock explicitly: a bare fork() child sharing this open file
+                    # description would otherwise keep the flock alive after close.
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                    except OSError:
+                        pass
+                    os.close(fd)
         finally:
             thread_lock.release()
 
     def _open_lock_file(self) -> Optional[int]:
         self._ensure_dir()
         try:
-            fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            # O_NOFOLLOW: a planted symlink (ELOOP) degrades below, never opens through.
+            fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         except OSError as exc:
             logger.warning(
                 "hermes-mobile: cannot open %s (%s); cross-process locking disabled "
@@ -418,7 +430,7 @@ class DeviceStore:
                 exc,
             )
             return None
-        _match_dir_owner(self.lock_path, self._path.parent)
+        _match_dir_owner(fd, self._path.parent, self.lock_path)
         return fd
 
     def _flock(self, fd: int, deadline: float) -> None:
@@ -446,12 +458,27 @@ class DeviceStore:
         directory = self._path.parent
         existed = directory.exists()
         directory.mkdir(parents=True, exist_ok=True)
-        if not existed:
+        if not existed and os.geteuid() == 0:
             # Root just created this directory (fresh install/reset): it is
             # root-owned, which would make _match_dir_owner's later checks on
             # *this* directory's owner (for the lock file and the store itself)
-            # see uid 0 and silently no-op. Hand it to its own parent's owner now.
-            _match_dir_owner(directory, directory.parent)
+            # see uid 0 and silently no-op. Hand it to its own parent's owner now,
+            # through an O_NOFOLLOW directory fd so a swapped-in symlink is refused.
+            try:
+                dir_fd = os.open(
+                    directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                )
+            except OSError as exc:
+                logger.warning(
+                    "hermes-mobile: could not chown %s to the store owner: %s",
+                    directory,
+                    exc,
+                )
+            else:
+                try:
+                    _match_dir_owner(dir_fd, directory.parent, directory)
+                finally:
+                    os.close(dir_fd)
         try:
             os.chmod(directory, 0o700)
         except OSError:
@@ -468,8 +495,8 @@ class DeviceStore:
                 json.dump(data, fh, indent=2, sort_keys=True)
                 fh.write("\n")
                 fh.flush()
+                _match_dir_owner(fh.fileno(), self._path.parent, self._path)
                 os.fsync(fh.fileno())
-            _match_dir_owner(Path(tmp_name), self._path.parent)
             os.replace(tmp_name, self._path)
         except BaseException:
             try:
