@@ -56,6 +56,7 @@ def _register_session_notify(ctx, store: DeviceStore) -> None:
     notifier = SessionNotifier(store=store, registry=get_registry())
     ctx.register_hook("on_session_end", notifier.on_session_end)
     ctx.register_hook("pre_approval_request", notifier.on_pre_approval_request)
+    ctx.register_hook("pre_tool_call", notifier.on_pre_tool_call)
     logger.info("hermes-mobile: registered session-stop notifier hooks")
 
 

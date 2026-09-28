@@ -147,3 +147,13 @@ def test_plugin_yaml_manifest():
         "model-provider",
     }
     assert manifest.get("requires_env", []) == []
+
+
+def test_plugin_yaml_declares_every_registered_hook(tmp_path):
+    yaml = pytest.importorskip("yaml")
+    from hermes_mobile.plugin import register_all
+
+    ctx = FakeCtx()
+    register_all(ctx, store=DeviceStore(path=tmp_path / "d.json"))
+    manifest = yaml.safe_load((REPO_ROOT / "plugin.yaml").read_text())
+    assert set(ctx.hooks) == set(manifest["provides_hooks"])

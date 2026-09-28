@@ -1,3 +1,6 @@
+import threading
+import time
+
 from hermes_mobile.session_notify import SessionClaimRegistry
 
 
@@ -29,7 +32,11 @@ def test_claim_without_device_is_noop():
 
 import pytest
 from hermes_mobile.device_store import DeviceStore
-from hermes_mobile.session_notify import SessionNotifier, get_registry
+from hermes_mobile.session_notify import (
+    ClarifyPushGate,
+    SessionNotifier,
+    get_registry,
+)
 
 
 class RecordingPush:
@@ -265,3 +272,178 @@ def test_coalesced_approval_follower_does_not_push(store):
         session_key="SKEY", surface="gateway", command="rm -rf /tmp/x"
     )
     assert len(push.sent) == 1
+
+
+# ---------------------------------------------------------------------------
+# clarify push via pre_tool_call (spec §6.5, §9.1)
+# ---------------------------------------------------------------------------
+
+
+def _sync(fn):
+    fn()
+
+
+def _no_thread(fn):
+    raise RuntimeError("can't start new thread")
+
+
+class RaisingPush:
+    def send(self, *args, **kwargs):
+        raise RuntimeError("expo down")
+
+
+class RaisingRegistry:
+    def resolve(self, *ids):
+        raise RuntimeError("registry broken")
+
+
+class RaisingStore:
+    def get_push_token(self, device_id):
+        raise RuntimeError("store broken")
+
+    def list_devices(self):
+        raise RuntimeError("store broken")
+
+
+class SpyStore:
+    def __init__(self):
+        self.touched = []
+
+    def __getattr__(self, name):
+        self.touched.append(name)
+        raise AttributeError(name)
+
+
+def test_clarify_pushes_redacted_to_the_claiming_device_only(store):
+    dev_a = _tokened(store, name="A", token="ExponentPushToken[A]")
+    _tokened(store, name="B", token="ExponentPushToken[B]")
+    reg = get_registry()
+    reg.claim(dev_a, "LIVE-A", "STORED-A", route_id="STORED-A")
+    push = RecordingPush()
+    n = SessionNotifier(store=store, push=push, registry=reg, background=_sync)
+    ret = n.on_pre_tool_call(
+        tool_name="clarify",
+        args={"question": "Deploy to prod or staging?", "choices": ["prod", "staging"]},
+        session_id="LIVE-A",
+        task_id="STORED-A",
+        tool_call_id="call_1",
+        turn_id="turn_1",
+        api_request_id="",
+        middleware_trace=[],
+        telemetry_schema_version=1,
+    )
+    assert ret is None
+    assert push.sent == [
+        {
+            "token": "ExponentPushToken[A]",
+            "title": "Hermes",
+            "body": "Hermes has a question",
+            "data": {"type": "clarify_request", "session_id": "STORED-A"},
+        }
+    ]
+    assert "Deploy" not in repr(push.sent) and "staging" not in repr(push.sent)
+
+
+@pytest.mark.parametrize("tool", ["terminal", "read_file", "delegate_task", "", None])
+def test_non_clarify_tools_never_push_or_touch_the_store(tool):
+    get_registry().claim("dev-x", "SID")
+    push = RecordingPush()
+    spy = SpyStore()
+    n = SessionNotifier(store=spy, push=push, registry=get_registry(), background=_sync)
+    assert (
+        n.on_pre_tool_call(
+            tool_name=tool, args={"command": "ls"}, session_id="SID", task_id="SID"
+        )
+        is None
+    )
+    assert push.sent == []
+    assert spy.touched == []
+
+
+def test_clarify_for_an_unclaimed_session_does_not_push(store):
+    _tokened(store)
+    push = RecordingPush()
+    n = SessionNotifier(
+        store=store, push=push, registry=get_registry(), background=_sync
+    )
+    assert (
+        n.on_pre_tool_call(tool_name="clarify", session_id="CLI-1", task_id="CLI-1")
+        is None
+    )
+    assert push.sent == []
+
+
+@pytest.mark.parametrize("broken", ["push", "registry", "store", "background"])
+def test_clarify_push_failures_never_reach_the_agent(store, broken):
+    dev = _tokened(store)
+    get_registry().claim(dev, "SID", "SKEY", route_id="SKEY")
+    n = SessionNotifier(
+        store=RaisingStore() if broken == "store" else store,
+        push=RaisingPush() if broken == "push" else RecordingPush(),
+        registry=RaisingRegistry() if broken == "registry" else get_registry(),
+        background=_no_thread if broken == "background" else _sync,
+    )
+    assert (
+        n.on_pre_tool_call(tool_name="clarify", session_id="SID", task_id="SKEY")
+        is None
+    )
+
+
+def test_clarify_push_runs_off_the_hook_thread(store):
+    dev = _tokened(store)
+    get_registry().claim(dev, "SID", route_id="SID")
+    release, sent = threading.Event(), threading.Event()
+
+    class SlowPush:
+        def send(self, token, title="Hermes", body=None, data=None):
+            release.wait(5)
+            sent.set()
+            return True
+
+    n = SessionNotifier(store=store, push=SlowPush(), registry=get_registry())
+    t0 = time.monotonic()
+    try:
+        assert n.on_pre_tool_call(tool_name="clarify", session_id="SID") is None
+        assert time.monotonic() - t0 < 0.5
+        assert not sent.is_set()
+    finally:
+        release.set()
+    assert sent.wait(5)
+
+
+def test_clarify_cooldown_drops_repeat_questions_for_one_session(store):
+    dev = _tokened(store)
+    reg = get_registry()
+    reg.claim(dev, "S1", route_id="S1")
+    reg.claim(dev, "S2", route_id="S2")
+    clock = {"t": 1000.0}
+    push = RecordingPush()
+    n = SessionNotifier(
+        store=store,
+        push=push,
+        registry=reg,
+        background=_sync,
+        clarify_gate=ClarifyPushGate(cooldown_seconds=30, clock=lambda: clock["t"]),
+    )
+    # A model re-asking in a loop gets one push.
+    for _ in range(5):
+        n.on_pre_tool_call(tool_name="clarify", session_id="S1")
+    assert len(push.sent) == 1
+    # Another session has its own window.
+    n.on_pre_tool_call(tool_name="clarify", session_id="S2")
+    assert len(push.sent) == 2
+    clock["t"] += 31
+    n.on_pre_tool_call(tool_name="clarify", session_id="S1")
+    assert len(push.sent) == 3
+
+
+def test_clarify_respects_disable_toggle(store, monkeypatch):
+    dev = _tokened(store)
+    get_registry().claim(dev, "SID")
+    monkeypatch.setenv("MOBILE_NOTIFY_ON_SESSION_END", "0")
+    push = RecordingPush()
+    n = SessionNotifier(
+        store=store, push=push, registry=get_registry(), background=_sync
+    )
+    assert n.on_pre_tool_call(tool_name="clarify", session_id="SID") is None
+    assert push.sent == []
