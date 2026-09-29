@@ -41,13 +41,15 @@ class FakeCtx:
     def register_cli_command(
         self, name, help, setup_fn, handler_fn=None, description=""
     ):
-        self.cli_commands.append({
-            "name": name,
-            "help": help,
-            "setup_fn": setup_fn,
-            "handler_fn": handler_fn,
-            "description": description,
-        })
+        self.cli_commands.append(
+            {
+                "name": name,
+                "help": help,
+                "setup_fn": setup_fn,
+                "handler_fn": handler_fn,
+                "description": description,
+            }
+        )
 
 
 def test_register_cli_registers_mobile_command(store):
@@ -104,7 +106,9 @@ def test_pair_default_name_and_detected_url(store, monkeypatch):
     monkeypatch.setattr(cli, "detect_gateway_url", lambda: "http://100.9.9.9:9119")
     rc, out = _run(["pair"], store)
     assert rc == 0
-    payload = json.loads(next(l for l in out.splitlines() if l.startswith("{")))
+    payload = json.loads(
+        next(line for line in out.splitlines() if line.startswith("{"))
+    )
     assert payload["url"] == "http://100.9.9.9:9119"
     assert store.list_devices()[0]["name"].startswith("device-")
 
@@ -139,7 +143,7 @@ def test_pair_with_qrcode_package_renders_qr(store, monkeypatch):
     assert rc == 0
     assert "##FAKE-QR##" in out
     # QR encodes exactly the printed JSON payload.
-    payload_line = next(l for l in out.splitlines() if l.startswith("{"))
+    payload_line = next(line for line in out.splitlines() if line.startswith("{"))
     assert rendered["payload"] == payload_line
 
 
