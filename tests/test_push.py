@@ -176,3 +176,236 @@ def test_legacy_record_without_push_token_field(store):
     assert store.get_push_token(device_id) is None
     assert store.set_push_token(device_id, "tok") is True
     assert store.get_push_token(device_id) == "tok"
+
+
+# ---------------------------------------------------------------------------
+# token redaction in logs
+# ---------------------------------------------------------------------------
+
+_TOKEN = "ExponentPushToken[xXsecretTOKEN123]"
+
+
+def _log_text(caplog) -> str:
+    return "\n".join(f"{r.getMessage()} {r.args!r}" for r in caplog.records)
+
+
+def test_ticket_error_log_redacts_the_push_token(caplog):
+    # Expo's DeviceNotRegistered message embeds the token verbatim.
+    transport = RecordingTransport(
+        response=json.dumps(
+            {
+                "data": {
+                    "status": "error",
+                    "message": f'"{_TOKEN}" is not a registered push notification recipient',
+                    "details": {"error": "DeviceNotRegistered"},
+                }
+            }
+        )
+    )
+    with caplog.at_level("WARNING"):
+        assert ExpoPush(transport=transport).send(_TOKEN) is False
+    text = _log_text(caplog)
+    assert caplog.records
+    assert "xXsecretTOKEN123" not in text
+    assert "DeviceNotRegistered" in text
+    assert "[redacted]" in text
+
+
+def test_http_error_body_log_redacts_push_tokens(caplog):
+    body = json.dumps(
+        {
+            "errors": [
+                {"message": "bad ExpoPushToken[otherSECRET] and ExponentPushToken[x]"}
+            ]
+        }
+    )
+    transport = RecordingTransport(status=400, response=body)
+    with caplog.at_level("WARNING"):
+        assert ExpoPush(transport=transport).send(_TOKEN) is False
+    text = _log_text(caplog)
+    assert caplog.records
+    assert "otherSECRET" not in text
+    assert "ExponentPushToken[x]" not in text
+
+
+def test_error_logs_redact_the_devices_own_bare_token(caplog):
+    # A token without the Expo wrapper is still the device's own secret.
+    bare = "fcm-bare-token-SECRET-42"
+    transport = RecordingTransport(
+        response=json.dumps({"data": {"status": "error", "message": f"bad {bare}"}})
+    )
+    with caplog.at_level("WARNING"):
+        assert ExpoPush(transport=transport).send(bare) is False
+    http = RecordingTransport(status=500, response=f"upstream choked on {bare}")
+    with caplog.at_level("WARNING"):
+        assert ExpoPush(transport=http).send(bare) is False
+    net = RecordingTransport(exc=OSError(f"reset while sending {bare}"))
+    with caplog.at_level("WARNING"):
+        assert ExpoPush(transport=net).send(bare) is False
+    text = _log_text(caplog)
+    assert len(caplog.records) == 3
+    assert bare not in text
+
+
+# ---------------------------------------------------------------------------
+# redaction hardening — one case per shape from the PR #10 round-2 probe
+# (scratchpad/pr10/redact_probe.py). Every secret below contains "secret".
+# ---------------------------------------------------------------------------
+
+_PROBE_TOKEN = "ExponentPushToken[AAAAsecretBBBB]"
+
+
+def _t(status=200, body="", exc=None):
+    def transport(url, data, headers):
+        if exc is not None:
+            raise exc
+        return status, body
+
+    return transport
+
+
+_ESCAPED_BODY = (
+    json.dumps({"m": _PROBE_TOKEN}, ensure_ascii=True)
+    .replace("[", "\\u005b")
+    .replace("]", "\\u005d")
+)
+
+_PROBE_CASES = {
+    "ticket, device's own token": (
+        _PROBE_TOKEN,
+        _t(
+            body=json.dumps(
+                {
+                    "data": {
+                        "status": "error",
+                        "message": f'"{_PROBE_TOKEN}" not registered',
+                    }
+                }
+            )
+        ),
+    ),
+    "ticket, token in details only": (
+        _PROBE_TOKEN,
+        _t(
+            body=json.dumps(
+                {
+                    "data": {
+                        "status": "error",
+                        "message": "x",
+                        "details": {
+                            "error": "DeviceNotRegistered",
+                            "expoPushToken": _PROBE_TOKEN,
+                        },
+                    }
+                }
+            )
+        ),
+    ),
+    "http body, truncated token (no closing bracket)": (
+        _PROBE_TOKEN,
+        _t(400, 'bad "to": ExponentPushToken[AAAAsecretBB'),
+    ),
+    "http body, JSON-escaped brackets": (_PROBE_TOKEN, _t(400, _ESCAPED_BODY)),
+    "http body, JSON-escaped brackets, uppercase hex": (
+        _PROBE_TOKEN,
+        _t(400, _ESCAPED_BODY.replace("005b", "005B").replace("005d", "005D")),
+    ),
+    "http body, other device's token, lowercase prefix": (
+        _PROBE_TOKEN,
+        _t(400, "bad exponentpushtoken[OTHERsecretX]"),
+    ),
+    "http body, other device's ExpoPushToken, upper case": (
+        _PROBE_TOKEN,
+        _t(400, "bad EXPOPUSHTOKEN[OTHERsecretX]"),
+    ),
+    "http body, other device's token, space before bracket": (
+        _PROBE_TOKEN,
+        _t(400, "bad ExponentPushToken [OTHERsecretX]"),
+    ),
+    "http body, token past the 200-char cut": (
+        _PROBE_TOKEN,
+        _t(400, "x" * 190 + _PROBE_TOKEN),
+    ),
+    "ticket list, second ticket": (
+        _PROBE_TOKEN,
+        _t(
+            body=json.dumps(
+                {
+                    "data": [
+                        {"status": "ok"},
+                        {"status": "error", "message": _PROBE_TOKEN},
+                    ]
+                }
+            )
+        ),
+    ),
+    "network exception containing the token": (
+        _PROBE_TOKEN,
+        _t(exc=OSError(f"reset {_PROBE_TOKEN}")),
+    ),
+    "ticket code is the token": (
+        _PROBE_TOKEN,
+        _t(
+            body=json.dumps(
+                {
+                    "data": {
+                        "status": "error",
+                        "message": "m",
+                        "details": {"error": _PROBE_TOKEN},
+                    }
+                }
+            )
+        ),
+    ),
+    "http 413 echoing a truncated prefix of the own bare token": (
+        "fcmTOKENsecretXYZ",
+        _t(413, "rejected fcmTOKENsecr"),
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(_PROBE_CASES), ids=list(_PROBE_CASES))
+def test_probe_case_logs_no_token(case, caplog):
+    token, transport = _PROBE_CASES[case]
+    with caplog.at_level("WARNING", logger="hermes_mobile.push"):
+        assert ExpoPush(transport=transport).send(token) is False
+    assert caplog.records, "expected a WARNING for the failed push"
+    text = _log_text(caplog)
+    assert "secret" not in text.lower(), text
+    # A truncated token keeps only a prefix of "secret" (e.g. "fcmTOKENsecr").
+    assert "secr" not in text.lower(), text
+
+
+def test_ticket_details_error_code_is_redacted(caplog):
+    # R2-2: the logged details.error code goes through the same redaction.
+    bare = "fcm-bare-token-secret-77"
+    transport = _t(
+        body=json.dumps(
+            {"data": {"status": "error", "message": "m", "details": {"error": bare}}}
+        )
+    )
+    with caplog.at_level("WARNING", logger="hermes_mobile.push"):
+        assert ExpoPush(transport=transport).send(bare) is False
+    text = _log_text(caplog)
+    assert "secret" not in text.lower(), text
+    assert "(" + "[redacted]" + ")" in text
+
+
+def test_redaction_leaves_ordinary_error_text_alone(caplog):
+    # The loosened pattern must not eat unrelated words or the error code.
+    transport = _t(
+        body=json.dumps(
+            {
+                "data": {
+                    "status": "error",
+                    "message": "Expo push service unavailable, retry later",
+                    "details": {"error": "MessageRateExceeded"},
+                }
+            }
+        )
+    )
+    with caplog.at_level("WARNING", logger="hermes_mobile.push"):
+        assert ExpoPush(transport=transport).send("fcmTOKENsecretXYZ") is False
+    text = _log_text(caplog)
+    assert "Expo push service unavailable, retry later" in text
+    assert "MessageRateExceeded" in text

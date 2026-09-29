@@ -134,6 +134,65 @@ class PlatformEntry:
     # and ADDING_A_PLATFORM.md lines 32-39)
 ```
 
+#### Target fields the mobile plugin registers — verified at v2026.8.18 and v2026.9.24
+
+Both tags declare these on `PlatformEntry` (8.18 `gateway/platform_registry.py:187-229`,
+9.24 `:89-101`). `adapter.register_platform` still feature-detects them
+(`dataclasses.fields(PlatformEntry)`, `init` fields only) and passes only the
+ones that exist, because `register_platform` forwards kwargs to the dataclass and
+an unknown key raises `TypeError`. If the call still raises `TypeError` with them,
+the plugin logs a WARNING and registers once more without them (the pre-0.2.1
+registration).
+
+```python
+cron_deliver_env_var: str = ""   # "MOBILE_HOME_CHANNEL": default device for bare deliver=mobile
+# (target_ref) -> Optional[(chat_id, thread_id)]; None = continue resolution
+parse_target_ref_fn: Optional[Callable[[str], Optional[tuple[str, Optional[str]]]]] = None
+# post-resolution: True accept, False reject, non-empty str = reject + diagnostic
+validate_target_ref_fn: Optional[Callable[[str], bool | str]] = None
+# out-of-process sender (no co-resident gateway):
+# async (pconfig, chat_id, message, *, thread_id=None, media_files=None,
+#        force_document=False) -> {"success": True, "message_id": ...} | {"error": str}
+standalone_sender_fn: Optional[Callable[..., Awaitable[dict]]] = None
+```
+
+`resolve_send_target(platform, target_ref, *, pass_unresolved_references=False)`
+(9.24 `tools/send_message_targets.py:140-207`; 8.18 `tools/send_message_tool.py:627-762`)
+is shared by `hermes send`, cron and (8.18) the `send_message` tool:
+
+1. The entry's `parse_target_ref_fn`. A non-`None` result must be a
+   `(non-empty str, str | None)` tuple and goes straight to the validator.
+2. Core heuristics: E.164 for phone platforms, all-digit ids, Matrix `!`/`@`,
+   XMPP JIDs. A 16-hex device id matches none of them unless it is all digits.
+3. The channel directory (`gateway.channel_directory.resolve_channel_name`).
+   It is always empty for `mobile`, which is outbound-only.
+4. Otherwise, for a plugin platform: with `pass_unresolved_references=True` (cron,
+   9.24 `cron/scheduler_delivery.py:651`) the raw ref is handed to the adapter
+   **only when the entry has no parser**. With a parser, every caller is strict:
+   "Could not resolve '<ref>' on mobile. The plugin parser did not recognize it
+   and no channel-directory entry matched."
+
+`validate_target_ref_fn` runs on every id returned from steps 1-4. A raised
+exception becomes "Target validator failed for platform 'mobile'".
+
+The mobile plugin's parser accepts exactly `[0-9a-f]{16}` after `strip().lower()`,
+which is `secrets.token_hex(DEVICE_ID_BYTES)`, the format `DeviceStore.create_device`
+mints. It returns `(device_id, None)`, and `None` for anything else. The validator
+re-reads `devices.json` on each call. It returns `True` for a paired, unrevoked device,
+`"device <id> is revoked"` for a revoked one, and
+``"no paired device <id> — see `hermes mobile devices`"`` for an unknown id.
+Bare `deliver=mobile` never reaches the parser or the validator. Cron resolves it from
+`MOBILE_HOME_CHANNEL` (9.24 `cron/scheduler_delivery.py:672-688`).
+
+Delivery lanes (9.24 `tools/send_message_tool.py:539-587`; 8.18 `:830-922`): the live
+in-process adapter (`gateway.run._gateway_runner_ref()`) comes first, then
+`standalone_sender_fn`, then an error. `hermes send` (`hermes_cli/send_cmd.py`) runs in
+its own process and never has a runner, so it always takes the standalone lane. The
+same holds for `hermes cron run` and for cron's standalone fallback. For a plugin with
+no `send_message_handler`, `_send_to_platform` ends in that generic lane. The mobile
+plugin's `standalone_sender_fn` builds a `MobileAdapter` and awaits its `send`. It
+refuses as root when the mailbox tree belongs to another uid.
+
 Real-world reference call: the bundled Discord plugin's `register(ctx)`
 (`plugins/platforms/discord/adapter.py:6598-6630`) passes
 `adapter_factory=_build_adapter, check_fn=check_discord_requirements,

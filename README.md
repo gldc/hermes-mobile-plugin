@@ -11,7 +11,7 @@ hermes-agent — no fork changes, nothing exposed to the public internet.
 | --- | --- |
 | **Auth provider** (`mobile-device`) | Per-device dashboard sessions: ~15-minute access tokens, 30-day rotating refresh tokens, SHA-256 hashes only at rest, refresh-token **reuse detection** (replaying an older rotated-out token revokes the whole device; the immediately-prior token is forgiven and re-rotated, so a client that's one rotation behind self-heals). Devices live in `~/.hermes/mobile/devices.json`. |
 | **CLI** (`hermes mobile`) | `pair` (mint a device + QR), `devices` (list), `revoke <device_id>`. |
-| **Platform adapter** (`mobile`) | Makes a paired phone a `send_message`/cron-delivery target: messages append to a per-device mailbox (`~/.hermes/mobile/mailbox/<device_id>.jsonl`) and fire a **redacted** Expo push ("New message from Hermes"). |
+| **Platform adapter** (`mobile`) | Makes a paired phone a cron-delivery / `hermes send` target (`mobile:<device_id>`): messages append to a per-device mailbox (`~/.hermes/mobile/mailbox/<device_id>.jsonl`) and fire a **redacted** Expo push ("New message from Hermes"). |
 | **Dashboard API** (`/api/plugins/mobile/…`) | `POST /push-token` (register the device's Expo push token), `GET /mailbox` (return + drain queued messages), `GET /me` (device self-info). These routes require a `mobile-device` session — other providers' sessions get 403. |
 | **Memory API** (`/api/plugins/mobile/memory/…`) | CRUD for hermes' built-in memory files `MEMORY.md` / `USER.md` (`~/.hermes/memories/`): `GET /memory/files` (list with size/mtime), `GET /memory/files/{name}` (read), `PUT /memory/files/{name}` (atomic full-file replace, ≤ 256 KiB). Open to **any** authenticated dashboard session (browser or device); file names are matched against a fixed allowlist and never path-joined. Full contract: [`docs/MEMORY_API.md`](docs/MEMORY_API.md). |
 
@@ -72,14 +72,26 @@ path for an expired or revoked refresh token.
 ### Sending to the phone
 
 Once paired, the device is a normal platform target whose **`chat_id` is the
-device id** (shown by `hermes mobile devices`, or in the app's Settings →
-Device). There are three ways to reach it:
+device id** (16 hex characters, shown by `hermes mobile devices`, or in the
+app's Settings → Device). Address it as `mobile:<device_id>` (case and
+surrounding whitespace are ignored). Names are **not** accepted as targets —
+they are not unique.
 
-- **Explicit `send_message` target (no config):** address the device directly,
-  e.g. `send_message(target="mobile:<device_id>")`. This is the reliable path —
-  tell the agent the device id.
-- **Default device for bare `mobile` sends:** to let the agent use
-  `send_message(target="mobile")` without an id, set a home channel in
+> **hermes ≥ 0.21 has no agent-callable `send_message` tool** (upstream removed
+> it on purpose). Agent → phone delivery is cron-only: the agent schedules a job
+> with the `cronjob` tool and `deliver=mobile` or `deliver=mobile:<device_id>`.
+
+- **Cron / scheduled delivery:** `deliver=mobile:<device_id>` targets one
+  device. Bare `deliver=mobile` uses the default device: set
+  `MOBILE_HOME_CHANNEL=<device_id>` in the gateway environment.
+- **From a shell:** `hermes send -t mobile:<device_id> "text"`. It runs out of
+  process (no gateway needed): the plugin's standalone sender appends to the
+  mailbox and fires the same redacted push as the gateway. Run it as the gateway
+  user (the image's `docker exec … hermes` shim already drops to it); as root
+  (`HERMES_DOCKER_EXEC_AS_ROOT=1`) it refuses rather than create root-owned
+  mailbox files the gateway can't read.
+- **hermes 0.20 (`send_message` tool):** `send_message(target="mobile:<device_id>")`.
+  For a bare `send_message(target="mobile")`, set a home channel in
   `~/.hermes/config.yaml`:
 
   ```yaml
@@ -91,15 +103,13 @@ Device). There are three ways to reach it:
         name: my-iphone
   ```
 
-- **Cron / scheduled delivery (`deliver=mobile`):** set
-  `MOBILE_HOME_CHANNEL=<device_id>` in the gateway environment. The scheduler
-  reads it to pick the default device.
+An unknown id fails with ``no paired device <id> — see `hermes mobile devices` ``
+and a revoked one with `device <id> is revoked`, both before anything is written.
 
-> **Note:** `send_message(action="list")` does **not** enumerate paired devices
-> — `mobile` is outbound-only, so the channel directory (built from live
-> connections + inbound session history) has nothing to show for it. The agent
-> must be given the device id or a configured home channel; it can't discover
-> devices by listing. Get ids from `hermes mobile devices`.
+> **Note:** `hermes send --list` does **not** enumerate paired devices —
+> `mobile` is outbound-only, so the channel directory (built from live
+> connections + inbound session history) has nothing to show for it. Get ids
+> from `hermes mobile devices`.
 
 ### Session-stop notifications
 
@@ -155,7 +165,8 @@ not a push-delivery failure).
   and APNs, so the adapter sends only "New message from Hermes" — never
   message content. The mailbox (fetched over the VPN) is the source of
   truth; push is a best-effort "go look" signal, and push failures
-  never block delivery.
+  never block delivery. Logged Expo errors mask the push token
+  (Expo echoes it in `DeviceNotRegistered` tickets).
 - **Per-device blast radius.** Each phone has its own credential chain;
   revoking one device touches nothing else.
 

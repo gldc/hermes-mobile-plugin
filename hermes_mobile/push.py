@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import urllib.error
 import urllib.request
 from typing import Callable, Optional, Tuple
@@ -32,6 +33,64 @@ _TIMEOUT_SECONDS = 10.0
 
 #: transport(url, data_bytes, headers) -> (status_code, response_text)
 Transport = Callable[[str, bytes, dict], Tuple[int, str]]
+
+_REDACTED = "[redacted]"
+#: Expo token shapes (``ExponentPushToken[...]``, ``ExpoPushToken[...]``), matched
+#: loosely: any case, optional whitespace before the bracket, a literal or
+#: JSON-escaped (``\u005b``/``\u005d``) bracket, and no closing bracket needed (a
+#: body cut off mid-token). The id stops at ``]``, whitespace, a quote or a
+#: backslash (the start of an escaped closing bracket).
+_EXPO_TOKEN_RE = re.compile(
+    r"(?i)(expo(?:nent)?pushtoken)\s*(?:\[|\\u005b)[^\]\s\"\\]*(?:\]|\\u005d)?"
+)
+#: A logged fragment this long that starts the device's own (non-Expo) token is
+#: treated as that token, truncated.
+_OWN_TOKEN_PREFIX_LEN = 8
+
+
+def _mask_own_token(text: str, token: str) -> str:
+    """Mask the device's own *token*, including a copy cut short by truncation.
+
+    Every occurrence of the token's first ``_OWN_TOKEN_PREFIX_LEN`` characters is
+    masked together with however much of the rest of the token follows it.
+    Shorter tokens are masked only where they appear whole.
+    """
+    if len(token) < _OWN_TOKEN_PREFIX_LEN:
+        return text.replace(token, _REDACTED)
+    head = token[:_OWN_TOKEN_PREFIX_LEN]
+    parts = []
+    pos = 0
+    while (hit := text.find(head, pos)) != -1:
+        end = hit + len(head)
+        matched = len(head)
+        while end < len(text) and matched < len(token) and text[end] == token[matched]:
+            end += 1
+            matched += 1
+        parts += [text[pos:hit], _REDACTED]
+        pos = end
+    parts.append(text[pos:])
+    return "".join(parts)
+
+
+def _redact(text: object, token: str) -> str:
+    """*text* with push tokens replaced before it reaches a log.
+
+    Expo echoes the token in error tickets (``DeviceNotRegistered``) and error
+    bodies. The token is a push credential for the device and has no place in
+    gateway or CLI logs. Masked: the device's own token (whole, or a truncated
+    copy when it is not Expo-shaped) and any Expo-shaped token, including
+    another device's.
+    """
+    out = str(text)
+    if token:
+        out = out.replace(token, _REDACTED)
+    out = _EXPO_TOKEN_RE.sub(lambda m: f"{m.group(1)}{_REDACTED}", out)
+    if token and not _EXPO_TOKEN_RE.fullmatch(token):
+        # Expo-shaped tokens are fully covered by the pattern above, including
+        # a cut-off copy; scanning for their "ExponentP" prefix would instead
+        # mangle the markers it just wrote.
+        out = _mask_own_token(out, token)
+    return out
 
 
 def _urllib_transport(url: str, data: bytes, headers: dict) -> Tuple[int, str]:
@@ -82,14 +141,16 @@ class ExpoPush:
                 {"Content-Type": "application/json", "Accept": "application/json"},
             )
         except Exception as exc:
-            logger.warning("hermes-mobile: Expo push failed (network): %s", exc)
+            logger.warning(
+                "hermes-mobile: Expo push failed (network): %s", _redact(exc, token)
+            )
             return False
 
         if status != 200:
             logger.warning(
                 "hermes-mobile: Expo push rejected (HTTP %s): %.200s",
                 status,
-                response_text,
+                _redact(response_text, token),  # redact first, then truncate
             )
             return False
 
@@ -99,9 +160,12 @@ class ExpoPush:
             tickets = data if isinstance(data, list) else [data]
             for ticket in tickets:
                 if isinstance(ticket, dict) and ticket.get("status") == "error":
+                    details = ticket.get("details")
+                    code = details.get("error") if isinstance(details, dict) else None
                     logger.warning(
-                        "hermes-mobile: Expo push ticket error: %s",
-                        ticket.get("message", "unknown"),
+                        "hermes-mobile: Expo push ticket error%s: %s",
+                        f" ({_redact(code, token)})" if code else "",
+                        _redact(ticket.get("message", "unknown"), token),
                     )
                     return False
         except (ValueError, AttributeError):

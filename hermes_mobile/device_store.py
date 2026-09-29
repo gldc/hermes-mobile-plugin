@@ -44,6 +44,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
+#: Device ids are ``secrets.token_hex(DEVICE_ID_BYTES)``: 16 lowercase hex chars.
+#: The adapter's ``mobile:<id>`` target parser is built from this, so it accepts
+#: every id this store can mint (cron delivery depends on it).
+DEVICE_ID_BYTES = 8
+
 ACCESS_TTL_SECONDS = 15 * 60  # ~15-minute access tokens
 REFRESH_TTL_SECONDS = 30 * 24 * 60 * 60  # 30-day rotating refresh tokens
 
@@ -213,7 +218,7 @@ class DeviceStore:
         The refresh token is returned exactly once (for the pairing QR);
         only its hash is stored.
         """
-        device_id = secrets.token_hex(8)
+        device_id = secrets.token_hex(DEVICE_ID_BYTES)
         refresh_token = secrets.token_urlsafe(32)
         now = self._now()
         with self._locked():
