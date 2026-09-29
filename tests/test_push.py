@@ -176,3 +176,72 @@ def test_legacy_record_without_push_token_field(store):
     assert store.get_push_token(device_id) is None
     assert store.set_push_token(device_id, "tok") is True
     assert store.get_push_token(device_id) == "tok"
+
+
+# ---------------------------------------------------------------------------
+# token redaction in logs
+# ---------------------------------------------------------------------------
+
+_TOKEN = "ExponentPushToken[xXsecretTOKEN123]"
+
+
+def _log_text(caplog) -> str:
+    return "\n".join(f"{r.getMessage()} {r.args!r}" for r in caplog.records)
+
+
+def test_ticket_error_log_redacts_the_push_token(caplog):
+    # Expo's DeviceNotRegistered message embeds the token verbatim.
+    transport = RecordingTransport(
+        response=json.dumps(
+            {
+                "data": {
+                    "status": "error",
+                    "message": f'"{_TOKEN}" is not a registered push notification recipient',
+                    "details": {"error": "DeviceNotRegistered"},
+                }
+            }
+        )
+    )
+    with caplog.at_level("WARNING"):
+        assert ExpoPush(transport=transport).send(_TOKEN) is False
+    text = _log_text(caplog)
+    assert caplog.records
+    assert "xXsecretTOKEN123" not in text
+    assert "DeviceNotRegistered" in text
+    assert "[redacted]" in text
+
+
+def test_http_error_body_log_redacts_push_tokens(caplog):
+    body = json.dumps(
+        {
+            "errors": [
+                {"message": "bad ExpoPushToken[otherSECRET] and ExponentPushToken[x]"}
+            ]
+        }
+    )
+    transport = RecordingTransport(status=400, response=body)
+    with caplog.at_level("WARNING"):
+        assert ExpoPush(transport=transport).send(_TOKEN) is False
+    text = _log_text(caplog)
+    assert caplog.records
+    assert "otherSECRET" not in text
+    assert "ExponentPushToken[x]" not in text
+
+
+def test_error_logs_redact_the_devices_own_bare_token(caplog):
+    # A token without the Expo wrapper is still the device's own secret.
+    bare = "fcm-bare-token-SECRET-42"
+    transport = RecordingTransport(
+        response=json.dumps({"data": {"status": "error", "message": f"bad {bare}"}})
+    )
+    with caplog.at_level("WARNING"):
+        assert ExpoPush(transport=transport).send(bare) is False
+    http = RecordingTransport(status=500, response=f"upstream choked on {bare}")
+    with caplog.at_level("WARNING"):
+        assert ExpoPush(transport=http).send(bare) is False
+    net = RecordingTransport(exc=OSError(f"reset while sending {bare}"))
+    with caplog.at_level("WARNING"):
+        assert ExpoPush(transport=net).send(bare) is False
+    text = _log_text(caplog)
+    assert len(caplog.records) == 3
+    assert bare not in text

@@ -19,6 +19,7 @@ import asyncio
 import dataclasses
 import inspect
 import json
+import os
 from typing import Any, Callable, Optional
 
 import pytest
@@ -263,6 +264,88 @@ def test_registration_passes_only_the_fields_that_exist(store, monkeypatch):
     assert "standalone_sender_fn" not in ctx.kwargs
 
 
+def test_registration_skips_fields_that_are_not_init_parameters(store, monkeypatch):
+    # A dataclass field declared init=False is not a constructor kwarg:
+    # passing it would raise TypeError just like an unknown key.
+    @dataclasses.dataclass
+    class _NoInitSenderEntry(_OldPlatformEntry):
+        parse_target_ref_fn: Optional[Callable] = None
+        validate_target_ref_fn: Optional[Callable] = None
+        standalone_sender_fn: Optional[Callable] = dataclasses.field(
+            default=None, init=False
+        )
+
+    monkeypatch.setattr(registry_mod, "PlatformEntry", _NoInitSenderEntry)
+    ctx = EntryBuildingCtx(_NoInitSenderEntry)
+
+    register_platform(ctx, store)  # must not raise TypeError
+
+    assert callable(ctx.kwargs["parse_target_ref_fn"])
+    assert "standalone_sender_fn" not in ctx.kwargs
+
+
+class _RejectingCtx:
+    """register_platform builds an entry class other than the one we introspect
+    (so detection is wrong): any target kwarg raises TypeError."""
+
+    def __init__(self):
+        self.calls: list = []
+
+    def register_platform(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        _OldPlatformEntry(**kwargs)  # TypeError on any target kwarg
+
+
+def test_registration_retries_without_target_fields_on_type_error(
+    store, monkeypatch, caplog
+):
+    ctx = _RejectingCtx()
+    with caplog.at_level("WARNING", logger="hermes_mobile.adapter"):
+        register_platform(ctx, store)  # the mobile platform must still load
+
+    assert len(ctx.calls) == 2
+    assert any(name in ctx.calls[0] for name in _NEW_FIELDS)
+    retry = ctx.calls[1]
+    for name in _NEW_FIELDS:
+        assert name not in retry
+    assert retry["name"] == "mobile"
+    assert retry["cron_deliver_env_var"] == "MOBILE_HOME_CHANNEL"
+    assert any(
+        r.levelname == "WARNING" and "retrying without" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_registration_type_error_without_target_fields_propagates(store, monkeypatch):
+    # Only the new kwargs get the fallback: a TypeError from the pre-existing
+    # registration is a real bug and must not be swallowed.
+    monkeypatch.setattr(registry_mod, "PlatformEntry", _OldPlatformEntry)
+
+    class _AlwaysFails:
+        calls = 0
+
+        def register_platform(self, **kwargs):
+            _AlwaysFails.calls += 1
+            raise TypeError("boom")
+
+    with pytest.raises(TypeError, match="boom"):
+        register_platform(_AlwaysFails(), store)
+    assert _AlwaysFails.calls == 1
+
+
+def test_registration_retry_failure_propagates(store):
+    class _AlwaysFails:
+        calls = 0
+
+        def register_platform(self, **kwargs):
+            _AlwaysFails.calls += 1
+            raise TypeError("still broken")
+
+    with pytest.raises(TypeError, match="still broken"):
+        register_platform(_AlwaysFails(), store)
+    assert _AlwaysFails.calls == 2  # one retry, not a loop
+
+
 # ---------------------------------------------------------------------------
 # standalone (out-of-process) sender
 # ---------------------------------------------------------------------------
@@ -362,6 +445,46 @@ def test_standalone_sender_root_check_is_a_noop_for_non_root(
         store, push=RecordingPush(), mailbox_dir=tmp_path / "mailbox"
     )
     assert run(sender(PlatformConfig(), DEVICE_ID, "hi"))["success"] is True
+
+
+def test_standalone_sender_root_writes_a_tree_root_already_owns(
+    tmp_path, store, monkeypatch
+):
+    # A root-run install (the whole hermes home is root's): root is the owner,
+    # so writing creates nothing another uid would be locked out of.
+    device_id, _ = store.create_device("iphone")  # before euid is faked
+    store.set_push_token(device_id, "ExponentPushToken[abc]")
+    real_lstat = os.lstat
+
+    def lstat_as_root_owned(path, *args, **kwargs):
+        st = real_lstat(path, *args, **kwargs)
+        return os.stat_result(
+            (
+                st.st_mode,
+                st.st_ino,
+                st.st_dev,
+                st.st_nlink,
+                0,  # st_uid: root
+                st.st_gid,
+                st.st_size,
+                int(st.st_atime),
+                int(st.st_mtime),
+                int(st.st_ctime),
+            )
+        )
+
+    monkeypatch.setattr(adapter_mod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(adapter_mod.os, "lstat", lstat_as_root_owned)
+    push = RecordingPush()
+    mailbox = tmp_path / "mailbox"
+    sender = make_standalone_sender(store, push=push, mailbox_dir=mailbox)
+
+    result = run(sender(PlatformConfig(), device_id, "hi from root"))
+
+    assert result.get("success") is True, result
+    lines = (mailbox / f"{device_id}.jsonl").read_text().splitlines()
+    assert [json.loads(line)["content"] for line in lines] == ["hi from root"]
+    assert len(push.sent) == 1
 
 
 # ---------------------------------------------------------------------------
