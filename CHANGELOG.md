@@ -31,6 +31,14 @@ All notable changes to hermes-mobile-plugin. Versions match `plugin.yaml`.
   `ExponentPushToken[...]`/`ExpoPushToken[...]` before they are logged. Expo's
   `DeviceNotRegistered` message echoes the token, and these warnings can now come
   from `hermes send` as well as from the gateway.
+- The redaction also catches Expo-shaped tokens in any case, with whitespace
+  before the bracket, with JSON-escaped brackets (`\u005b`/`\u005d`), and with
+  no closing bracket (a body cut off mid-token). It also catches a truncated copy
+  of the device's own non-Expo token (an 8+ character prefix), and it redacts
+  the logged ticket `details.error` code.
+- CI (#11): GitHub Actions runs the full suite against both cores (v2026.8.18
+  and v2026.9.24), plus `ruff check` and `ruff format --check`, on every PR and
+  on every push to `main`.
 
 ### Changed
 - Cron `deliver=mobile:<id>` is now strict. An id that is unknown or revoked is

@@ -9,6 +9,15 @@ The plugin is tested against the two hermes-agent tags that dc1-1 can run:
 
 The full suite must pass on both (see README → Development).
 
+## CI
+Done in #11 (review F7). `.github/workflows/ci.yml` runs on every PR and push to
+`main`:
+- `pytest (hermes v2026.8.18)` and `pytest (hermes v2026.9.24)`: the upstream
+  core at its pinned tag commit, with the core's pyproject dependencies, on
+  Python 3.13.
+- `ruff`: `check` and `format --check`.
+Branch protection is not set, so the checks are not yet required to merge.
+
 ## Current release: 0.2.1 (main)
 `plugin.yaml` and `dashboard/manifest.json` are both at 0.2.1.
 - `mobile:<device_id>` resolves on both cores through `parse_target_ref_fn` and
@@ -17,7 +26,8 @@ The full suite must pass on both (see README → Development).
 - The fields are feature-detected (`init` fields only). If `register_platform`
   still raises `TypeError` with them, the plugin retries once without them, so the
   `mobile` platform always loads.
-- Push tokens are redacted from logged Expo errors.
+- Push tokens are redacted from logged Expo errors (Expo-shaped tokens in any
+  case, escaped or truncated, and the device's own token, truncated too).
 
 ## Delivery surfaces (0.21.5)
 - Agent to phone goes through cron only (the `cronjob` tool with
@@ -38,11 +48,6 @@ The full suite must pass on both (see README → Development).
   writer. Fix: an `fcntl.flock(LOCK_EX)` on a `mailbox/<id>.lock` sidecar in both
   functions, held by the drain from read through truncate/unlink (the same
   pattern DeviceStore uses).
-- **No CI (review F7).** The repo has no GitHub Actions workflow, so the "CI
-  green before merge" gate cannot be met. The gate is the local run of the full
-  suite against both core tags, checked by exit code (README → Development).
-  Fix: a workflow that archives v2026.8.18 and v2026.9.24 and runs pytest
-  against each.
 
 ## Deploy note
 The box's boot pulls plugin `main`. After a merge, the next gateway restart runs
