@@ -254,7 +254,9 @@ def _platform_entry_fields() -> FrozenSet[str]:
         from gateway import platform_registry
 
         return frozenset(
-            f.name for f in dataclasses.fields(platform_registry.PlatformEntry)
+            f.name
+            for f in dataclasses.fields(platform_registry.PlatformEntry)
+            if f.init  # an init=False field is not a constructor kwarg
         )
     except Exception:
         logger.debug("hermes-mobile: cannot introspect PlatformEntry", exc_info=True)
@@ -274,8 +276,27 @@ def register_platform(ctx, store: DeviceStore) -> None:
     }
     supported = _platform_entry_fields()
     target_kwargs = {k: v for k, v in optional.items() if k in supported}
-    ctx.register_platform(
-        **target_kwargs,
+    base_kwargs = _base_registration_kwargs(store)
+    try:
+        ctx.register_platform(**target_kwargs, **base_kwargs)
+    except TypeError as exc:
+        if not target_kwargs:
+            raise
+        # Detection was wrong for this core (e.g. its register_platform builds a
+        # different entry class). Never let that keep the platform from loading:
+        # register exactly as before these fields existed.
+        logger.warning(
+            "hermes-mobile: register_platform rejected %s (%s); retrying without "
+            "them — mobile:<device_id> targets and out-of-process sends are off",
+            ", ".join(sorted(target_kwargs)),
+            exc,
+        )
+        ctx.register_platform(**base_kwargs)
+
+
+def _base_registration_kwargs(store: DeviceStore) -> Dict[str, Any]:
+    """The registration every supported core accepts (pre-0.2.1 behaviour)."""
+    return dict(
         name=PLATFORM_NAME,
         label="Mobile",
         adapter_factory=lambda cfg: MobileAdapter(cfg, store=store),

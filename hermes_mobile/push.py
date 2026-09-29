@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import urllib.error
 import urllib.request
 from typing import Callable, Optional, Tuple
@@ -32,6 +33,24 @@ _TIMEOUT_SECONDS = 10.0
 
 #: transport(url, data_bytes, headers) -> (status_code, response_text)
 Transport = Callable[[str, bytes, dict], Tuple[int, str]]
+
+_REDACTED = "[redacted]"
+#: Expo token shapes (``ExponentPushToken[...]``, ``ExpoPushToken[...]``).
+_EXPO_TOKEN_RE = re.compile(r"(Expo(?:nent)?PushToken)\[[^\]]*\]")
+
+
+def _redact(text: object, token: str) -> str:
+    """*text* with push tokens replaced before it reaches a log.
+
+    Expo echoes the token in error tickets (``DeviceNotRegistered``) and error
+    bodies. The token is a push credential for the device and has no place in
+    gateway or CLI logs, so both the device's own token string and any
+    Expo-shaped token are masked.
+    """
+    out = str(text)
+    if token:
+        out = out.replace(token, _REDACTED)
+    return _EXPO_TOKEN_RE.sub(lambda m: f"{m.group(1)}{_REDACTED}", out)
 
 
 def _urllib_transport(url: str, data: bytes, headers: dict) -> Tuple[int, str]:
@@ -82,14 +101,16 @@ class ExpoPush:
                 {"Content-Type": "application/json", "Accept": "application/json"},
             )
         except Exception as exc:
-            logger.warning("hermes-mobile: Expo push failed (network): %s", exc)
+            logger.warning(
+                "hermes-mobile: Expo push failed (network): %s", _redact(exc, token)
+            )
             return False
 
         if status != 200:
             logger.warning(
                 "hermes-mobile: Expo push rejected (HTTP %s): %.200s",
                 status,
-                response_text,
+                _redact(response_text, token),  # redact first, then truncate
             )
             return False
 
@@ -99,9 +120,12 @@ class ExpoPush:
             tickets = data if isinstance(data, list) else [data]
             for ticket in tickets:
                 if isinstance(ticket, dict) and ticket.get("status") == "error":
+                    details = ticket.get("details")
+                    code = details.get("error") if isinstance(details, dict) else None
                     logger.warning(
-                        "hermes-mobile: Expo push ticket error: %s",
-                        ticket.get("message", "unknown"),
+                        "hermes-mobile: Expo push ticket error%s: %s",
+                        f" ({_redact(code, token)})" if code else "",
+                        _redact(ticket.get("message", "unknown"), token),
                     )
                     return False
         except (ValueError, AttributeError):
