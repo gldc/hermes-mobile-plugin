@@ -1,6 +1,6 @@
 name: hermes-mobile
 kind: platform
-version: 0.2.0
+version: 0.2.1
 description: >
   Mobile companion plugin for hermes-agent: QR-paired per-device dashboard
   auth (rotating ~15-min access tokens, 30-day refresh tokens with reuse
