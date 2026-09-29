@@ -28,7 +28,7 @@ def test_append_is_append_only_and_private(tmp_path):
     mailbox.append_message(tmp_path, "dev1", "one")
     mailbox.append_message(tmp_path, "dev1", "two")
     path = tmp_path / "dev1.jsonl"
-    contents = [json.loads(l)["content"] for l in path.read_text().splitlines()]
+    contents = [json.loads(line)["content"] for line in path.read_text().splitlines()]
     assert contents == ["one", "two"]
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
