@@ -19,7 +19,6 @@ from gateway.config import PlatformConfig
 from gateway.platform_registry import PlatformEntry, platform_registry
 from gateway.platforms.base import BasePlatformAdapter, SendResult
 
-from hermes_mobile import adapter as adapter_mod
 from hermes_mobile.adapter import MobileAdapter, check_requirements, register_platform
 from hermes_mobile.device_store import DeviceStore
 

@@ -1,0 +1,92 @@
+# Full suite against BOTH hermes-agent cores the plugin ships against, plus ruff.
+#
+# Mirrors README → Development: the core is NOT installed; its source tree goes on
+# PYTHONPATH (read-only), with the core's own pinned runtime dependencies installed
+# from its pyproject.toml. Cores are fetched from the public upstream repo at the
+# tag's commit (pinned by SHA so a moved tag cannot change what we test).
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest (hermes ${{ matrix.core }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - core: v2026.8.18 # 0.20.4 — dc1-1 rollback image
+            sha: e624e9fde561e1add9388384012b295fde669ade
+            version: 0.20.4
+          - core: v2026.9.24 # 0.21.5 — dc1-1 live
+            sha: f97608f178d1ffeca59860195ab7da295f7c8e5f
+            version: 0.21.5
+    steps:
+      - name: Check out plugin
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check out hermes-agent ${{ matrix.core }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: NousResearch/hermes-agent
+          ref: ${{ matrix.sha }}
+          path: .hermes-core
+          persist-credentials: false
+
+      - name: Verify core version
+        env:
+          EXPECTED: ${{ matrix.version }}
+        run: |
+          actual="$(sed -n 's/^version = "\(.*\)"$/\1/p' .hermes-core/pyproject.toml)"
+          echo "hermes-agent version: ${actual}"
+          test "${actual}" = "${EXPECTED}"
+
+      - name: Set up uv + Python 3.13
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.11.8"
+          python-version: "3.13"
+          activate-environment: true
+          enable-cache: false
+
+      - name: Install the core's runtime dependencies
+        run: uv pip install -r .hermes-core/pyproject.toml "pytest==9.1.1"
+
+      - name: pytest
+        run: PYTHONPATH="${GITHUB_WORKSPACE}/.hermes-core" python -m pytest tests/ -q -rs
+
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out plugin
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.11.8"
+          enable-cache: false
+
+      - name: ruff check
+        run: uvx ruff@0.14.10 check .
+
+      - name: ruff format --check
+        run: uvx ruff@0.14.10 format --check .

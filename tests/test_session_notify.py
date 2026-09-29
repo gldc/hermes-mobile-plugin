@@ -1,7 +1,15 @@
 import threading
 import time
 
-from hermes_mobile.session_notify import SessionClaimRegistry
+import pytest
+
+from hermes_mobile.device_store import DeviceStore
+from hermes_mobile.session_notify import (
+    ClarifyPushGate,
+    SessionClaimRegistry,
+    SessionNotifier,
+    get_registry,
+)
 
 
 def test_claim_and_resolve_by_either_id():
@@ -28,15 +36,6 @@ def test_claim_without_device_is_noop():
     reg = SessionClaimRegistry()
     reg.claim("", "SID")
     assert reg.resolve("SID") is None
-
-
-import pytest
-from hermes_mobile.device_store import DeviceStore
-from hermes_mobile.session_notify import (
-    ClarifyPushGate,
-    SessionNotifier,
-    get_registry,
-)
 
 
 class RecordingPush:

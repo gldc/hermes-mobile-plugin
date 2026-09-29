@@ -183,6 +183,12 @@ done
 HERMES_MOBILE_LOCKTEST_DIR=/mnt/user/appdata/hermes-locktest python -m pytest tests/test_device_store_locking.py -q
 ```
 
+CI (`.github/workflows/ci.yml`) runs the same loop on every PR and push to `main`.
+Each core is a matrix leg: upstream `NousResearch/hermes-agent` at the tag's pinned
+commit on `PYTHONPATH`, with the core's own `pyproject.toml` dependencies installed,
+Python 3.13. A separate job runs `ruff check .` and `ruff format --check .`
+(ruff 0.14.10).
+
 Layout: `hermes_mobile/` (device_store, auth_provider, cli, push,
 mailbox, adapter, plugin_api), `dashboard/` (manifest + router shim the
 dashboard web server imports), root `__init__.py` + `plugin.yaml`
