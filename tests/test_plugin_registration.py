@@ -24,3 +24,10 @@ def test_register_all_registers_session_hooks(tmp_path):
     register_all(ctx, store=DeviceStore(path=tmp_path / "devices.json"))
     assert "on_session_end" in ctx.hooks
     assert "pre_approval_request" in ctx.hooks
+
+
+def test_register_all_registers_pre_tool_call_hook(tmp_path):
+    ctx = FakeCtx()
+    register_all(ctx, store=DeviceStore(path=tmp_path / "devices.json"))
+    assert len(ctx.hooks["pre_tool_call"]) == 1
+    assert ctx.hooks["pre_tool_call"][0].__name__ == "on_pre_tool_call"

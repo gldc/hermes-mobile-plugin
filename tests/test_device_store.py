@@ -321,3 +321,76 @@ def test_missing_file_means_empty_store(store_path, clock):
     store = DeviceStore(path=store_path, clock=clock)
     assert store.list_devices() == []
     assert store.verify_access("anything") is None
+
+
+# ---------------------------------------------------------------------------
+# atomic write (spec §9.1: unique tmp per write)
+# ---------------------------------------------------------------------------
+
+
+def test_save_uses_a_unique_tmp_file_per_write(store, store_path, monkeypatch):
+    import os
+    from pathlib import Path
+
+    import hermes_mobile.device_store as ds
+
+    seen = []
+    real_replace = ds.os.replace
+
+    def spy(src, dst):
+        seen.append(Path(src))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(ds.os, "replace", spy)
+    store.create_device("a")
+    store.create_device("b")
+    assert len(seen) == 2
+    assert seen[0] != seen[1]
+    for p in seen:
+        assert p.parent == store_path.parent
+        assert p.name.startswith(".devices.json.") and p.name.endswith(".tmp")
+        assert p.name != f".devices.json.{os.getpid()}.tmp"
+    assert [
+        p.name for p in store_path.parent.iterdir() if p.name.endswith(".tmp")
+    ] == []
+
+
+def test_save_fsyncs_before_replace(store, monkeypatch):
+    import hermes_mobile.device_store as ds
+
+    events = []
+    real_fsync, real_replace = ds.os.fsync, ds.os.replace
+
+    def fsync(fd):
+        events.append("fsync")
+        return real_fsync(fd)
+
+    def replace(src, dst):
+        events.append("replace")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(ds.os, "fsync", fsync)
+    monkeypatch.setattr(ds.os, "replace", replace)
+    store.create_device("phone")
+    assert "fsync" in events
+    assert events.index("fsync") < events.index("replace")
+
+
+def test_failed_write_keeps_previous_file_and_leaves_no_tmp(
+    store, store_path, monkeypatch
+):
+    import hermes_mobile.device_store as ds
+
+    store.create_device("first")
+    before = store_path.read_text()
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(ds.json, "dump", boom)
+    with pytest.raises(RuntimeError, match="disk full"):
+        store.create_device("second")
+    assert store_path.read_text() == before
+    assert [
+        p.name for p in store_path.parent.iterdir() if p.name.endswith(".tmp")
+    ] == []

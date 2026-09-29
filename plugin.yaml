@@ -1,6 +1,6 @@
 name: hermes-mobile
 kind: platform
-version: 0.1.0
+version: 0.2.0
 description: >
   Mobile companion plugin for hermes-agent: QR-paired per-device dashboard
   auth (rotating ~15-min access tokens, 30-day refresh tokens with reuse
@@ -13,4 +13,4 @@ author: GianLuca D'Intino-Conte (https://github.com/gldc)
 requires_env: []
 optional_env: []
 provides_tools: []
-provides_hooks: [on_session_end, pre_approval_request]
+provides_hooks: [on_session_end, pre_approval_request, pre_tool_call]

@@ -198,3 +198,25 @@ def test_revoke_session_is_best_effort_and_never_raises(provider, tmp_path, cloc
     path.write_text("not json")
     broken = MobileDeviceProvider(store=DeviceStore(path=path, clock=clock))
     broken.revoke_session(refresh_token="x")  # no raise even on corruption
+
+
+def test_refresh_lock_timeout_is_transient_not_repair(tmp_path, clock):
+    """A store lock we cannot get is an outage (ProviderError → retry), never an
+    auth failure (RefreshExpiredError → the phone is bounced to re-pair)."""
+    import fcntl
+    import os
+
+    from hermes_cli.dashboard_auth import ProviderError
+
+    store = DeviceStore(path=tmp_path / "devices.json", clock=clock, lock_timeout=0.2)
+    _, rt = store.create_device("phone")
+    fd = os.open(store.lock_path, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        with pytest.raises(ProviderError):
+            MobileDeviceProvider(store=store).refresh_session(refresh_token=rt)
+    finally:
+        os.close(fd)
+    # The device survived: the same RT still rotates once the lock is free.
+    session = MobileDeviceProvider(store=store).refresh_session(refresh_token=rt)
+    assert session.refresh_token

@@ -707,3 +707,15 @@ other providers.
 - [ ] Platform adapter: subclass `BasePlatformAdapter`, implement
       `connect/disconnect/send/get_chat_info`, return `SendResult`,
       factory signature `(PlatformConfig) -> adapter`.
+
+---
+
+## 6. Hooks consumed (`ctx.register_hook`) — verified at v2026.8.18 and v2026.9.24
+
+All three are in `VALID_HOOKS` at both tags (`tests/test_hook_contract.py`).
+
+| Hook | Fired from | Kwargs we read | Notes |
+|---|---|---|---|
+| `on_session_end` | `agent/turn_finalizer.py` (9.24:716, 8.18:819) | `session_id` (= `agent.session_id`), `task_id` (= tui `session_key`), `interrupted` | bounded, fail-open at 9.24 |
+| `pre_approval_request` | 9.24 `tools/approval_gateway_wait.py`; 8.18 `tools/approval.py` | `session_key`, `surface`, `coalesced` | coalesced followers fire with `coalesced=True` at **both** tags (8.18 approval.py:4113, 9.24 approval_gateway_wait.py:110) |
+| `pre_tool_call` | `hermes_cli.plugins._get_pre_tool_call_directive_details` (called by the agent tool executors) | `tool_name`, `session_id`, `task_id` | full payload: `tool_name, args, task_id, session_id, tool_call_id, turn_id, api_request_id, middleware_trace, telemetry_schema_version`. **Not** `function_name`/`function_args` (those are caller locals). Return `None` = no directive. **9.24 is fail-closed**: a callback that raises, or exceeds `plugins.hook_callback_timeout` (30 s), becomes `{"action": "block"}` and the tool does not run (`hermes_cli/plugins_dispatch.py:49,237-242`); a hung callback is skipped (= blocked) for later calls. 8.18 logs and ignores callback exceptions. `clarify` reaches this hook on both tags (8.18 `agent/tool_executor.py:2116` → `_run_agent_tool_execution_middleware`; 9.24 `_dispatch_authorized_once`).
