@@ -138,9 +138,11 @@ class PlatformEntry:
 
 Both tags declare these on `PlatformEntry` (8.18 `gateway/platform_registry.py:187-229`,
 9.24 `:89-101`). `adapter.register_platform` still feature-detects them
-(`dataclasses.fields(PlatformEntry)`) and passes only the ones that exist,
-because `register_platform` forwards kwargs to the dataclass and an unknown key
-raises `TypeError`.
+(`dataclasses.fields(PlatformEntry)`, `init` fields only) and passes only the
+ones that exist, because `register_platform` forwards kwargs to the dataclass and
+an unknown key raises `TypeError`. If the call still raises `TypeError` with them,
+the plugin logs a WARNING and registers once more without them (the pre-0.2.1
+registration).
 
 ```python
 cron_deliver_env_var: str = ""   # "MOBILE_HOME_CHANNEL": default device for bare deliver=mobile

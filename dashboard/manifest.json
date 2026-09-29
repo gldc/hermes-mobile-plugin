@@ -3,7 +3,7 @@
   "label": "Mobile",
   "description": "Hermes mobile companion — device push tokens, per-device mailbox sync, and device self-info for the QR-paired mobile app.",
   "icon": "Smartphone",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "tab": {
     "hidden": true
   },

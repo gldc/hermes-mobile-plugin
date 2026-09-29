@@ -165,7 +165,8 @@ not a push-delivery failure).
   and APNs, so the adapter sends only "New message from Hermes" — never
   message content. The mailbox (fetched over the VPN) is the source of
   truth; push is a best-effort "go look" signal, and push failures
-  never block delivery.
+  never block delivery. Logged Expo errors mask the push token
+  (Expo echoes it in `DeviceNotRegistered` tickets).
 - **Per-device blast radius.** Each phone has its own credential chain;
   revoking one device touches nothing else.
 

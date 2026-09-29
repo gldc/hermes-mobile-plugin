@@ -9,12 +9,15 @@ The plugin is tested against the two hermes-agent tags that dc1-1 can run:
 
 The full suite must pass on both (see README → Development).
 
-## Current release: 0.2.1 (branch `fix/mobile-target-parser-0215`, not merged)
+## Current release: 0.2.1 (main)
+`plugin.yaml` and `dashboard/manifest.json` are both at 0.2.1.
 - `mobile:<device_id>` resolves on both cores through `parse_target_ref_fn` and
   `validate_target_ref_fn`. `hermes send -t mobile:<id>` delivers out of process
   through `standalone_sender_fn`.
-- The fields are feature-detected, so an older `PlatformEntry` without them still
-  registers.
+- The fields are feature-detected (`init` fields only). If `register_platform`
+  still raises `TypeError` with them, the plugin retries once without them, so the
+  `mobile` platform always loads.
+- Push tokens are redacted from logged Expo errors.
 
 ## Delivery surfaces (0.21.5)
 - Agent to phone goes through cron only (the `cronjob` tool with
@@ -27,9 +30,19 @@ The full suite must pass on both (see README → Development).
 - `hermes send -t mobile` (bare, no id) reads the gateway config's
   `platforms.mobile.home_channel`, not `MOBILE_HOME_CHANNEL`. Pass the id
   explicitly.
-- Mailbox drain (`GET /mailbox`) reads the file and then unlinks it. An append
-  that lands between the read and the unlink is lost. This was already true for
-  the live adapter, and now `hermes send` is one more writer.
+- **Mailbox drain lock (review F6).** `drain_messages` does `read_text()` then
+  `unlink()`, and `append_message` takes no lock. An append that lands between
+  the read and the unlink is lost, and so is one whose fd was opened before the
+  unlink (it goes into an orphaned inode). The sender still reports success.
+  This was already true for the live adapter, and now `hermes send` is one more
+  writer. Fix: an `fcntl.flock(LOCK_EX)` on a `mailbox/<id>.lock` sidecar in both
+  functions, held by the drain from read through truncate/unlink (the same
+  pattern DeviceStore uses).
+- **No CI (review F7).** The repo has no GitHub Actions workflow, so the "CI
+  green before merge" gate cannot be met. The gate is the local run of the full
+  suite against both core tags, checked by exit code (README → Development).
+  Fix: a workflow that archives v2026.8.18 and v2026.9.24 and runs pytest
+  against each.
 
 ## Deploy note
 The box's boot pulls plugin `main`. After a merge, the next gateway restart runs
